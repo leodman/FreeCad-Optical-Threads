@@ -2,16 +2,18 @@
 
 A small FreeCAD project for generating **real, printable optical/camera/telescope threads** without manually sketching and debugging a helix every time.
 
-## v0.1 scope
+## develop/v0.1 scope
 
-The first generator creates:
+The current development generator creates:
 
 - **T2 / M42 × 0.75 internal thread**
-- 60° metric-style V thread
+- 60° metric-style profile
 - Parametric thread/sleeve length
 - Parametric wall thickness
 - Practical fit presets
-- User-editable diametral clearance
+- Independent diametral clearance
+- Independent root/valley relief
+- Independent crest/summit truncation
 - Recomputes when parameters change
 
 The output is a normal FreeCAD solid that can be fused, cut, linked, cloned, or used as a building block in a larger model.
@@ -32,22 +34,54 @@ This project puts the standard and geometry behind a simple generator.
 
 The macro opens a small dialog. The generated object remains parametric after creation.
 
-## v0.1 fit presets
+## v0.1.3 print-fit correction
 
-`DiametralClearance` means the amount added to the diameters of the **female** thread.
+Physical print testing showed that simply adding clearance was not enough. The printed M42 × 0.75 female thread could engage only after the sleeve was slit so it could flex outward, and comparison with a known-good metal thread showed that the generated thread valley was too shallow.
 
-| Fit | Diametral clearance |
+The correction in v0.1.3 is therefore geometric:
+
+- **Pitch remains 0.75 mm.**
+- **Helix geometry remains unchanged.**
+- Fit clearance no longer substitutes for thread depth.
+- `RootRelief` cuts the female valley/root farther outward radially.
+- `CrestTruncation` removes material from the female summit/crest independently.
+- `DiametralClearance` remains an independent mating-fit parameter.
+
+For the current **FDM print** preset:
+
+| Parameter | Value |
 |---|---:|
-| Basic / nominal | 0.00 mm |
-| Close | +0.05 mm |
-| Normal | +0.10 mm |
-| Loose | +0.20 mm |
-| FDM print | +0.30 mm |
-| Custom | user selected |
+| Diametral clearance | +0.20 mm |
+| Root relief | +0.10 mm radial |
+| Crest truncation | +0.05 mm radial |
 
-These are **practical fit presets**, not certified ISO tolerance classes such as 6H/6g. Printer, resin, filament, machining process, material, and the mating commercial part can all require adjustment.
+For M42 × 0.75, the macro uses the ISO-style basic internal minor diameter:
 
-For a commercial telescope/camera part, start with **Normal** and make a short test ring before printing or machining the final adapter.
+`D1 = D - 1.082531754 × P`
+
+With the FDM preset, the resulting geometry is approximately:
+
+- Basic internal minor diameter: **41.1881 mm**
+- Effective female crest diameter: **41.4881 mm**
+- Effective female root diameter: **42.4000 mm**
+- Effective radial groove depth: **0.4560 mm**
+
+The important design rule is that **print clearance and thread depth are separate controls**. The generator may truncate the thread summit for printability, but it should still carve the valley fully enough to avoid the shallow-thread failure seen in the first printed test.
+
+## Fit presets
+
+These are practical printing/machining presets, not certified ISO tolerance classes such as 6H/6g.
+
+| Fit | Diametral clearance | Root relief | Crest truncation |
+|---|---:|---:|---:|
+| Basic / nominal | 0.00 mm | 0.00 mm | 0.00 mm |
+| Close | +0.05 mm | 0.00 mm | 0.00 mm |
+| Normal | +0.10 mm | 0.00 mm | 0.00 mm |
+| Loose | +0.20 mm | +0.05 mm radial | +0.025 mm radial |
+| FDM print | +0.20 mm | +0.10 mm radial | +0.05 mm radial |
+| Custom | user selected | user selected | user selected |
+
+Printer, resin, filament, machining process, material, and the mating commercial part can all require adjustment. Short test rings are recommended before printing a final adapter.
 
 ## T2 geometry
 
@@ -56,12 +90,6 @@ For a commercial telescope/camera part, start with **Normal** and make a short t
 - Pitch: **0.75 mm**
 - Thread angle: **60°**
 - Default hand: right-hand
-
-For the basic internal minor diameter the macro uses:
-
-`D1 = D - 1.082531754 × P`
-
-The selected diametral clearance is then added to the female profile.
 
 ## Planned next steps
 
@@ -81,7 +109,7 @@ The selected diametral clearance is then added to the female profile.
 
 Target: FreeCAD 1.x.
 
-The macro uses FreeCAD's `Part` geometry API (`makeHelix`, sweep/pipe shell, Boolean cut) and creates a `PartDesign::FeaturePython` object.
+The macro uses FreeCAD's `Part` geometry API (`makeHelix` / `makeLongHelix`, sweep/pipe shell, Boolean cut) and creates a `PartDesign::FeaturePython` object.
 
 ## License
 
