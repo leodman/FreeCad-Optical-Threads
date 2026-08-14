@@ -2,16 +2,18 @@
 
 A small FreeCAD project for generating **real, printable optical/camera/telescope threads** without manually sketching and debugging a helix every time.
 
-## v0.1 scope
+## v0.2 scope
 
-The first generator creates:
+The current generator creates:
 
 - **T2 / M42 × 0.75 internal thread**
 - 60° metric-style V thread
 - Parametric thread/sleeve length
 - Parametric wall thickness
 - Practical fit presets
-- User-editable diametral clearance
+- Independent diametral clearance
+- Independent root relief (deeper thread valley)
+- Independent crest truncation
 - Recomputes when parameters change
 
 The output is a normal FreeCAD solid that can be fused, cut, linked, cloned, or used as a building block in a larger model.
@@ -32,22 +34,34 @@ This project puts the standard and geometry behind a simple generator.
 
 The macro opens a small dialog. The generated object remains parametric after creation.
 
-## v0.1 fit presets
+## v0.2 fit model
 
-`DiametralClearance` means the amount added to the diameters of the **female** thread.
+The v0.2 correction is based on print testing: clearance must not be obtained by simply making the complete thread profile shallower.
 
-| Fit | Diametral clearance |
+Three parameters are now separated:
+
+- `DiametralClearance`: shifts the female thread outward for fit.
+- `RootRelief`: cuts the thread valley/root deeper, radially.
+- `CrestTruncation`: removes material from the thread crest/summit, radially.
+
+Pitch and helix geometry are left unchanged.
+
+### FDM print default
+
+| Parameter | Default |
 |---|---:|
-| Basic / nominal | 0.00 mm |
-| Close | +0.05 mm |
-| Normal | +0.10 mm |
-| Loose | +0.20 mm |
-| FDM print | +0.30 mm |
-| Custom | user selected |
+| Diametral clearance | +0.20 mm diameter |
+| Root relief | +0.10 mm radial |
+| Crest truncation | +0.05 mm radial |
 
-These are **practical fit presets**, not certified ISO tolerance classes such as 6H/6g. Printer, resin, filament, machining process, material, and the mating commercial part can all require adjustment.
+For M42 × 0.75 this gives approximately:
 
-For a commercial telescope/camera part, start with **Normal** and make a short test ring before printing or machining the final adapter.
+- Basic internal minor diameter: **41.1881 mm**
+- Effective female crest diameter: **41.4881 mm**
+- Effective female root diameter: **42.4000 mm**
+- Effective radial groove depth: **0.4560 mm**
+
+The practical fit presets are not certified ISO tolerance classes such as 6H/6g. Printer, resin, filament, machining process, material, and the mating commercial part can all require adjustment.
 
 ## T2 geometry
 
@@ -61,12 +75,12 @@ For the basic internal minor diameter the macro uses:
 
 `D1 = D - 1.082531754 × P`
 
-The selected diametral clearance is then added to the female profile.
+The selected print-fit corrections are then applied independently to the crest and root geometry.
 
 ## Planned next steps
 
 - M42 × 0.75 external
-- A paired fit mode that creates matching male/female test coupons
+- Paired male/female generation so printed parts are generated as a matched pair
 - Additional optical standards:
   - M48 × 0.75
   - M28.5 × 0.6 (1.25-inch filters)
