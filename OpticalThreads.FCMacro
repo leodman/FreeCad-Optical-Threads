@@ -1,17 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-FreeCAD Optical Threads - v0.1
+FreeCAD Optical Threads - v0.1.1
 T2 / M42 x 0.75 internal threaded sleeve generator.
 
-Creates a parametric Part::FeaturePython object with:
-- NominalDiameter
-- Pitch
-- Length
-- WallThickness
-- Fit
-- DiametralClearance
-
-The generated object is intended to be fused/cut/linked into larger FreeCAD models.
+The user selects length, wall thickness and practical fit/clearance.
+The macro creates a parametric FeaturePython solid.
 
 License: MIT
 """
@@ -44,51 +37,26 @@ class T2InternalThreadProxy:
     def __init__(self, obj):
         obj.Proxy = self
 
-        obj.addProperty(
-            "App::PropertyString",
-            "ThreadDesignation",
-            "Thread",
-            "Human-readable thread designation",
-        )
+        obj.addProperty("App::PropertyString", "ThreadDesignation", "Thread")
         obj.ThreadDesignation = "T2 / M42 x 0.75 internal"
 
-        obj.addProperty(
-            "App::PropertyLength",
-            "NominalDiameter",
-            "Thread",
-            "Nominal major diameter",
-        )
+        obj.addProperty("App::PropertyLength", "NominalDiameter", "Thread")
         obj.NominalDiameter = 42.0
 
-        obj.addProperty(
-            "App::PropertyLength",
-            "Pitch",
-            "Thread",
-            "Thread pitch",
-        )
+        obj.addProperty("App::PropertyLength", "Pitch", "Thread")
         obj.Pitch = 0.75
 
-        obj.addProperty(
-            "App::PropertyLength",
-            "Length",
-            "Geometry",
-            "Axial thread/sleeve length",
-        )
+        obj.addProperty("App::PropertyLength", "Length", "Geometry")
         obj.Length = 8.0
 
-        obj.addProperty(
-            "App::PropertyLength",
-            "WallThickness",
-            "Geometry",
-            "Radial wall thickness outside nominal major diameter",
-        )
+        obj.addProperty("App::PropertyLength", "WallThickness", "Geometry")
         obj.WallThickness = 3.0
 
         obj.addProperty(
             "App::PropertyEnumeration",
             "Fit",
             "Fit",
-            "Practical fit preset. Clearance is diametral.",
+            "Practical fit preset; clearance is diametral.",
         )
         obj.Fit = list(FIT_PRESETS.keys())
         obj.Fit = "Normal"
@@ -97,28 +65,25 @@ class T2InternalThreadProxy:
             "App::PropertyLength",
             "DiametralClearance",
             "Fit",
-            "Amount added to the female thread diameters. "
-            "Use Custom fit to edit freely.",
+            "Amount added to the female thread diameters.",
         )
         obj.DiametralClearance = FIT_PRESETS["Normal"]
 
-        obj.addProperty(
-            "App::PropertyBool",
-            "RightHand",
-            "Thread",
-            "Right-hand thread when true",
-        )
+        obj.addProperty("App::PropertyBool", "RightHand", "Thread")
         obj.RightHand = True
 
         obj.addProperty(
-            "App::PropertyString",
-            "ProfileNote",
-            "Information",
-            "Description of the generated profile",
+            "App::PropertyAngle",
+            "SeamOffset",
+            "Advanced",
+            "Rotates the helix away from the cylindrical seam for robust booleans.",
         )
+        obj.SeamOffset = 30.0
+
+        obj.addProperty("App::PropertyString", "ProfileNote", "Information")
         obj.ProfileNote = (
             "60 degree metric-style V profile. Female basic minor diameter "
-            "uses D1 = D - 1.082532*P. Fit presets are practical clearances, "
+            "D1 = D - 1.082531754*P. Fit presets are practical clearances, "
             "not certified ISO tolerance classes."
         )
 
@@ -129,8 +94,7 @@ class T2InternalThreadProxy:
 
     def onChanged(self, obj, prop):
         if prop == "Fit":
-            fit_name = str(obj.Fit)
-            preset = FIT_PRESETS.get(fit_name)
+            preset = FIT_PRESETS.get(str(obj.Fit))
             if preset is not None:
                 obj.DiametralClearance = preset
 
@@ -140,10 +104,12 @@ class T2InternalThreadProxy:
         length = float(obj.Length.Value)
         wall = float(obj.WallThickness.Value)
         clearance_d = float(obj.DiametralClearance.Value)
+        seam_offset = float(obj.SeamOffset)
 
         if d <= 0 or p <= 0 or length <= 0 or wall <= 0:
             raise ValueError("Diameter, pitch, length and wall thickness must be > 0")
 
+        # ISO metric basic female-thread minor diameter.
         basic_minor_d = d - 1.082531754 * p
         minor_d = basic_minor_d + clearance_d
         major_d = d + clearance_d
@@ -155,14 +121,23 @@ class T2InternalThreadProxy:
         if r_outer <= r_major:
             raise ValueError("Wall thickness is too small for the selected fit")
 
-        eps = max(0.01, p * 0.01)
+        # Make the plain sleeve first. The bore is the female minor diameter;
+        # the helical cutter will open the V groove outward to the major diameter.
+        eps = max(0.02, p * 0.03)
         outer = Part.makeCylinder(r_outer, length)
-        bore = Part.makeCylinder(r_minor, length + 2.0 * eps, App.Vector(0, 0, -eps))
+        bore = Part.makeCylinder(
+            r_minor,
+            length + 2.0 * eps,
+            App.Vector(0, 0, -eps),
+        )
         sleeve = outer.cut(bore)
 
+        # Extend the thread by one pitch at each end and trim it naturally with
+        # the finite sleeve. Long boolean operations are less reliable in OCC.
         helix_z0 = -p
         helix_height = length + 2.0 * p
         r_path = (r_minor + r_major) / 2.0
+
         helix = Part.makeHelix(
             p,
             helix_height,
@@ -172,37 +147,67 @@ class T2InternalThreadProxy:
         )
         helix.translate(App.Vector(0, 0, helix_z0))
 
+        # IMPORTANT: FreeCAD/OCC cylinders have a seam. Starting the helix on
+        # the same seam can make a boolean cut silently fail. Rotate the helix
+        # and its section together away from that seam.
+        z_axis = App.Vector(0, 0, 1)
+        origin = App.Vector(0, 0, 0)
+        helix.rotate(origin, z_axis, seam_offset)
+
+        # 60-degree included V profile. Full axial width is intentionally less
+        # than the 0.75 mm pitch so adjacent turns cannot self-intersect.
         depth = r_major - r_minor
         half_width = depth * math.tan(math.radians(30.0))
-        overlap = max(0.01, depth * 0.03)
+
+        # Give the cutter a healthy overlap into the already-open bore. Tiny
+        # coincident/tangent overlaps are a common OCC boolean failure mode.
+        overlap = max(0.08, depth * 0.20)
 
         p1 = App.Vector(r_minor - overlap, 0, helix_z0 - half_width)
-        p2 = App.Vector(r_major + overlap, 0, helix_z0)
+        p2 = App.Vector(r_major + 0.03, 0, helix_z0)
         p3 = App.Vector(r_minor - overlap, 0, helix_z0 + half_width)
 
         e1 = Part.makeLine(p1, p2)
         e2 = Part.makeLine(p2, p3)
         e3 = Part.makeLine(p3, p1)
         profile = Part.Wire([e1, e2, e3])
+        profile.rotate(origin, z_axis, seam_offset)
 
-        try:
-            cutter = Part.Wire(helix.Edges).makePipeShell([profile], True, True)
-        except Exception:
-            cutter = helix.makePipeShell([profile], True, True)
+        spine = Part.Wire(helix.Edges)
+        cutter = spine.makePipeShell([profile], True, True)
+
+        if cutter.isNull() or not cutter.Solids:
+            raise RuntimeError("The helical sweep did not create a solid cutter")
+
+        # Do not silently return a smooth ring. Verify that the helical cutter
+        # actually intersects the sleeve before performing the final cut.
+        intersection = sleeve.common(cutter)
+        if intersection.isNull() or intersection.Volume < 1.0e-6:
+            raise RuntimeError(
+                "Thread cutter does not intersect the sleeve. "
+                "Try changing SeamOffset (for example 20-45 deg)."
+            )
 
         result = sleeve.cut(cutter)
+
+        if result.isNull():
+            raise RuntimeError("Thread boolean cut produced a null shape")
+        if hasattr(result, "isValid") and not result.isValid():
+            raise RuntimeError("Thread boolean cut produced an invalid shape")
 
         try:
             result = result.removeSplitter()
         except Exception:
             pass
 
-        if result.isNull():
-            raise RuntimeError("Thread generation produced a null shape")
-        if hasattr(result, "isValid") and not result.isValid():
-            raise RuntimeError("Thread generation produced an invalid shape")
-
         obj.Shape = result
+
+        # Better visual tessellation for the fine 0.75 mm thread.
+        try:
+            obj.ViewObject.Deviation = 0.08
+            obj.ViewObject.AngularDeflection = 15.0
+        except Exception:
+            pass
 
 
 class T2InternalViewProvider:
@@ -259,8 +264,7 @@ def create_t2_internal(
     obj.Length = float(length)
     obj.WallThickness = float(wall_thickness)
 
-    valid_fits = list(FIT_PRESETS.keys())
-    if fit not in valid_fits:
+    if fit not in FIT_PRESETS:
         fit = "Normal"
     obj.Fit = fit
 
@@ -277,7 +281,6 @@ def create_t2_internal(
 
 
 def _show_dialog():
-    """Small creation dialog. Falls back to defaults in headless mode."""
     if Gui is None:
         return create_t2_internal()
 
@@ -321,9 +324,9 @@ def _show_dialog():
     clearance_box.setSuffix(" mm dia")
 
     def fit_changed(name):
-        val = FIT_PRESETS.get(str(name))
-        if val is not None:
-            clearance_box.setValue(val)
+        value = FIT_PRESETS.get(str(name))
+        if value is not None:
+            clearance_box.setValue(value)
             clearance_box.setEnabled(False)
         else:
             clearance_box.setEnabled(True)
@@ -355,7 +358,4 @@ def _show_dialog():
     return None
 
 
-if __name__ == "__main__":
-    _show_dialog()
-else:
-    _show_dialog()
+_show_dialog()
