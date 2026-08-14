@@ -1,26 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-FreeCAD Optical Threads - v0.2
+FreeCAD Optical Threads - v0.1.3
 T2 / M42 x 0.75 internal threaded sleeve generator.
 
-v0.2 correction:
-- Thread depth is NOT reduced to create print clearance.
-- Female thread root/valley can be cut deeper with RootRelief.
-- Female crest/summit can be truncated independently with CrestTruncation.
-- DiametralClearance remains an independent fit parameter.
-- Pitch and helix geometry remain unchanged.
+Correction from print testing:
+- preserve thread pitch/helix
+- do not obtain fit by making the whole thread shallower
+- deepen the female root/valley independently
+- truncate the female crest/summit independently
+- keep diametral fit clearance as a separate parameter
 
-The defaults are deliberately aimed at an FDM test of M42 x 0.75:
-    DiametralClearance = 0.20 mm
-    RootRelief         = 0.10 mm radial
-    CrestTruncation    = 0.05 mm radial
-
-For M42 x 0.75 these defaults produce approximately:
-    basic ISO internal minor diameter = 41.1881 mm
-    effective crest diameter          = 41.4881 mm
-    effective root diameter           = 42.4000 mm
-    effective radial groove depth     = 0.4560 mm
-
+Built on the robust v0.1.2 swept-profile method.
 License: MIT
 """
 
@@ -63,59 +53,22 @@ CREST_TRUNC_PRESETS = {
 
 
 class T2InternalThreadProxy:
-    """Parametric M42x0.75 internal threaded sleeve."""
-
-    Type = "FreeCADOpticalThreads::T2InternalV02"
+    Type = "FreeCADOpticalThreads::T2Internal"
 
     def __init__(self, obj):
         obj.Proxy = self
-
-        obj.addProperty(
-            "App::PropertyString",
-            "ThreadDesignation",
-            "Thread",
-            "Human-readable thread designation",
-        )
+        obj.addProperty("App::PropertyString", "ThreadDesignation", "Thread")
         obj.ThreadDesignation = "T2 / M42 x 0.75 internal"
-
-        obj.addProperty(
-            "App::PropertyLength",
-            "NominalDiameter",
-            "Thread",
-            "Nominal major diameter",
-        )
+        obj.addProperty("App::PropertyLength", "NominalDiameter", "Thread")
         obj.NominalDiameter = 42.0
-
-        obj.addProperty(
-            "App::PropertyLength",
-            "Pitch",
-            "Thread",
-            "Thread pitch",
-        )
+        obj.addProperty("App::PropertyLength", "Pitch", "Thread")
         obj.Pitch = 0.75
-
-        obj.addProperty(
-            "App::PropertyLength",
-            "Length",
-            "Geometry",
-            "Axial thread/sleeve length",
-        )
+        obj.addProperty("App::PropertyLength", "Length", "Geometry")
         obj.Length = 8.0
-
-        obj.addProperty(
-            "App::PropertyLength",
-            "WallThickness",
-            "Geometry",
-            "Radial wall thickness outside nominal major diameter",
-        )
+        obj.addProperty("App::PropertyLength", "WallThickness", "Geometry")
         obj.WallThickness = 3.0
 
-        obj.addProperty(
-            "App::PropertyEnumeration",
-            "Fit",
-            "Fit",
-            "Practical fit preset. Clearance is diametral.",
-        )
+        obj.addProperty("App::PropertyEnumeration", "Fit", "Fit")
         obj.Fit = list(FIT_PRESETS.keys())
         obj.Fit = "FDM print"
 
@@ -123,7 +76,7 @@ class T2InternalThreadProxy:
             "App::PropertyLength",
             "DiametralClearance",
             "Fit",
-            "Independent fit allowance. Added diametrally to the female thread.",
+            "Independent diametral fit allowance added to the female thread.",
         )
         obj.DiametralClearance = FIT_PRESETS["FDM print"]
 
@@ -131,8 +84,7 @@ class T2InternalThreadProxy:
             "App::PropertyLength",
             "RootRelief",
             "Profile",
-            "Extra radial depth at the female thread root/valley. "
-            "This deepens the groove without changing pitch.",
+            "Extra radial depth at the female thread root/valley.",
         )
         obj.RootRelief = ROOT_RELIEF_PRESETS["FDM print"]
 
@@ -140,80 +92,47 @@ class T2InternalThreadProxy:
             "App::PropertyLength",
             "CrestTruncation",
             "Profile",
-            "Radial amount removed from the female crest/summit. "
-            "This intentionally flattens the crest for printable clearance.",
+            "Radial amount removed from the female crest/summit.",
         )
         obj.CrestTruncation = CREST_TRUNC_PRESETS["FDM print"]
 
-        obj.addProperty(
-            "App::PropertyBool",
-            "RightHand",
-            "Thread",
-            "Right-hand thread when true",
-        )
+        obj.addProperty("App::PropertyBool", "RightHand", "Thread")
         obj.RightHand = True
-
-        obj.addProperty(
-            "App::PropertyAngle",
-            "SeamOffset",
-            "Advanced",
-            "Rotates the helix and section away from the cylinder seam for robust booleans.",
-        )
+        obj.addProperty("App::PropertyAngle", "SeamOffset", "Advanced")
         obj.SeamOffset = 30.0
+        obj.addProperty("App::PropertyBool", "DebugObjects", "Advanced")
+        obj.DebugObjects = False
 
-        obj.addProperty(
-            "App::PropertyString",
-            "ProfileNote",
-            "Information",
-            "Description of the generated profile",
-        )
+        obj.addProperty("App::PropertyLength", "EffectiveCrestDiameter", "Information")
+        obj.addProperty("App::PropertyLength", "EffectiveRootDiameter", "Information")
+        obj.addProperty("App::PropertyLength", "EffectiveRadialDepth", "Information")
+        obj.addProperty("App::PropertyString", "ProfileNote", "Information")
         obj.ProfileNote = (
-            "v0.2: 60 degree M42x0.75 internal thread. "
-            "Basic internal minor diameter D1 = D - 1.082531754*P. "
-            "Fit clearance, root relief, and crest truncation are independent. "
-            "RootRelief deepens the valley; CrestTruncation cuts the summit."
-        )
-
-        obj.addProperty(
-            "App::PropertyLength",
-            "EffectiveCrestDiameter",
-            "Information",
-            "Computed effective female crest/minor diameter.",
-        )
-        obj.addProperty(
-            "App::PropertyLength",
-            "EffectiveRootDiameter",
-            "Information",
-            "Computed effective female root/major diameter.",
-        )
-        obj.addProperty(
-            "App::PropertyLength",
-            "EffectiveRadialDepth",
-            "Information",
-            "Computed radial depth from crest to root.",
+            "v0.1.3: M42x0.75, 60 degree internal profile. "
+            "D1=D-1.082531754*P. Clearance, root relief and crest truncation "
+            "are independent; RootRelief deepens the valley instead of "
+            "reducing thread depth to obtain fit."
         )
 
         for name in (
             "ThreadDesignation",
             "NominalDiameter",
             "Pitch",
-            "ProfileNote",
             "EffectiveCrestDiameter",
             "EffectiveRootDiameter",
             "EffectiveRadialDepth",
+            "ProfileNote",
         ):
             obj.setEditorMode(name, 1)
 
     def onChanged(self, obj, prop):
         if prop == "Fit":
-            fit_name = str(obj.Fit)
-
-            fit = FIT_PRESETS.get(fit_name)
-            root = ROOT_RELIEF_PRESETS.get(fit_name)
-            crest = CREST_TRUNC_PRESETS.get(fit_name)
-
-            if fit is not None:
-                obj.DiametralClearance = fit
+            fit = str(obj.Fit)
+            clearance = FIT_PRESETS.get(fit)
+            root = ROOT_RELIEF_PRESETS.get(fit)
+            crest = CREST_TRUNC_PRESETS.get(fit)
+            if clearance is not None:
+                obj.DiametralClearance = clearance
             if root is not None:
                 obj.RootRelief = root
             if crest is not None:
@@ -229,123 +148,124 @@ class T2InternalThreadProxy:
         crest_trunc = float(obj.CrestTruncation.Value)
         seam_offset = float(obj.SeamOffset)
 
-        if d <= 0 or p <= 0 or length <= 0 or wall <= 0:
+        if min(d, p, length, wall) <= 0:
             raise ValueError("Diameter, pitch, length and wall thickness must be > 0")
         if root_relief < 0 or crest_trunc < 0:
             raise ValueError("RootRelief and CrestTruncation must be >= 0")
 
-        # ISO metric basic internal-thread minor diameter.
         basic_minor_d = d - 1.082531754 * p
 
-        # IMPORTANT v0.2 geometry:
-        #
-        # Clearance is independent of profile depth.
-        #
-        # Female crest/minor diameter:
-        #   - starts at the ISO basic minor diameter
-        #   - shifts outward by the selected diametral fit clearance
-        #   - is additionally truncated radially (2x on diameter)
-        #
-        # Female root/major diameter:
-        #   - starts at the nominal major diameter
-        #   - shifts outward by the selected diametral fit clearance
-        #   - is additionally relieved radially (2x on diameter)
-        #
-        # Therefore RootRelief actually carves the valley deeper instead of
-        # obtaining fit by making the entire thread shallower.
+        # Clearance, crest truncation and root relief are independent.
         crest_d = basic_minor_d + clearance_d + 2.0 * crest_trunc
         root_d = d + clearance_d + 2.0 * root_relief
 
         r_crest = crest_d / 2.0
         r_root = root_d / 2.0
         r_outer = d / 2.0 + wall
-
-        if r_root <= r_crest:
-            raise ValueError("Invalid profile: root diameter must exceed crest diameter")
-        if r_outer <= r_root:
-            raise ValueError("Wall thickness is too small for the selected root relief")
-
         depth = r_root - r_crest
+
+        if depth <= 0:
+            raise ValueError("Invalid profile: root radius must exceed crest radius")
+        if r_outer <= r_root + 0.1:
+            raise ValueError("Wall thickness is too small")
 
         obj.EffectiveCrestDiameter = crest_d
         obj.EffectiveRootDiameter = root_d
         obj.EffectiveRadialDepth = depth
 
-        # Base sleeve. The cylindrical bore stops at the truncated crest.
-        eps = max(0.01, p * 0.01)
+        # Plain sleeve at the truncated female crest/minor diameter.
+        eps = max(0.03, 0.04 * p)
         outer = Part.makeCylinder(r_outer, length)
         bore = Part.makeCylinder(
-            r_crest,
-            length + 2.0 * eps,
-            App.Vector(0, 0, -eps),
+            r_crest, length + 2.0 * eps, App.Vector(0, 0, -eps)
         )
         sleeve = outer.cut(bore)
 
-        # Helical V-groove cutter. Pitch/helix are unchanged from v0.1.
-        helix_z0 = -p
-        helix_height = length + 2.0 * p
-        r_path = (r_crest + r_root) / 2.0
-
-        helix = Part.makeHelix(
-            p,
-            helix_height,
-            r_path,
-            0,
-            not bool(obj.RightHand),
+        # Move the cylinder seam away from the sweep start. Helix and profile
+        # remain aligned with each other; this preserves the robust v0.1.2 method.
+        sleeve.rotate(
+            App.Vector(0, 0, 0), App.Vector(0, 0, 1), seam_offset
         )
-        helix.translate(App.Vector(0, 0, helix_z0))
 
-        # Keep the helix/profile away from the OCC cylinder seam. This was
-        # important in v0.1.1 and is retained in v0.2.
-        z_axis = App.Vector(0, 0, 1)
-        origin = App.Vector(0, 0, 0)
-        helix.rotate(origin, z_axis, seam_offset)
+        z0 = -p
+        helix_height = length + 2.0 * p
 
-        # 60 degree included V: each flank is 30 degrees from radial.
-        half_width = depth * math.tan(math.radians(30.0))
-        overlap = max(0.08, depth * 0.20)
+        # Four-sided cutter with finite flats avoids degenerate sharp sweep tips.
+        radial_overlap = max(0.10, 0.25 * depth)
+        x_inner = r_crest - radial_overlap
+        x_outer = r_root + max(0.04, 0.08 * depth)
 
-        # The triangle reaches all the way to the relieved root radius.
-        p1 = App.Vector(r_crest - overlap, 0, helix_z0 - half_width)
-        p2 = App.Vector(r_root + 0.03, 0, helix_z0)
-        p3 = App.Vector(r_crest - overlap, 0, helix_z0 + half_width)
+        ideal_half_width = depth * math.tan(math.radians(30.0))
+        root_half = min(0.36 * p, ideal_half_width + 0.08 * p)
+        crest_half = 0.05 * p
 
-        e1 = Part.makeLine(p1, p2)
-        e2 = Part.makeLine(p2, p3)
-        e3 = Part.makeLine(p3, p1)
-        profile = Part.Wire([e1, e2, e3])
-        profile.rotate(origin, z_axis, seam_offset)
+        q1 = App.Vector(x_inner, 0, z0 - root_half)
+        q2 = App.Vector(x_outer, 0, z0 - crest_half)
+        q3 = App.Vector(x_outer, 0, z0 + crest_half)
+        q4 = App.Vector(x_inner, 0, z0 + root_half)
+
+        profile = Part.Wire([
+            Part.makeLine(q1, q2),
+            Part.makeLine(q2, q3),
+            Part.makeLine(q3, q4),
+            Part.makeLine(q4, q1),
+        ])
+
+        # The helix passes through the section at its start.
+        r_spine = x_inner + 0.45 * (x_outer - x_inner)
+        try:
+            helix = Part.makeLongHelix(
+                p, helix_height, r_spine, 0, not bool(obj.RightHand)
+            )
+        except Exception:
+            helix = Part.makeHelix(
+                p, helix_height, r_spine, 0, not bool(obj.RightHand)
+            )
+        helix.translate(App.Vector(0, 0, z0))
 
         spine = Part.Wire(helix.Edges)
         cutter = spine.makePipeShell([profile], True, True)
 
-        if cutter.isNull() or not cutter.Solids:
-            raise RuntimeError("The helical sweep did not create a solid cutter")
+        if cutter.isNull() or len(cutter.Solids) == 0:
+            raise RuntimeError("Helical sweep did not create a solid cutter")
 
-        intersection = sleeve.common(cutter)
-        if intersection.isNull() or intersection.Volume < 1.0e-6:
+        common = sleeve.common(cutter)
+        if common.isNull() or common.Volume <= 1.0e-5:
             raise RuntimeError(
-                "Thread cutter does not intersect the sleeve. "
-                "Try changing SeamOffset (for example 20-45 deg)."
+                "Thread cutter does not intersect sleeve. "
+                "Set DebugObjects=true and report the FreeCAD version."
             )
 
         result = sleeve.cut(cutter)
+        if result.isNull():
+            raise RuntimeError("Thread boolean cut returned a null shape")
+        if hasattr(result, "isValid") and not result.isValid():
+            raise RuntimeError("Thread boolean cut produced an invalid shape")
 
         try:
             result = result.removeSplitter()
         except Exception:
             pass
 
-        if result.isNull():
-            raise RuntimeError("Thread generation produced a null shape")
-        if hasattr(result, "isValid") and not result.isValid():
-            raise RuntimeError("Thread generation produced an invalid shape")
-
         obj.Shape = result
 
+        if bool(obj.DebugObjects):
+            doc = obj.Document
+            for name, shape in (
+                ("DEBUG_ThreadProfile", profile),
+                ("DEBUG_ThreadHelix", helix),
+                ("DEBUG_ThreadCutter", cutter),
+                ("DEBUG_ThreadIntersection", common),
+            ):
+                old = doc.getObject(name)
+                if old:
+                    doc.removeObject(name)
+                dbg = doc.addObject("Part::Feature", name)
+                dbg.Shape = shape
+
         try:
-            obj.ViewObject.Deviation = 0.08
-            obj.ViewObject.AngularDeflection = 15.0
+            obj.ViewObject.Deviation = 0.05
+            obj.ViewObject.AngularDeflection = 10.0
         except Exception:
             pass
 
@@ -353,9 +273,6 @@ class T2InternalThreadProxy:
 class T2InternalViewProvider:
     def __init__(self, vobj):
         vobj.Proxy = self
-
-    def getIcon(self):
-        return ""
 
     def attach(self, vobj):
         self.ViewObject = vobj
@@ -375,6 +292,9 @@ class T2InternalViewProvider:
     def setDisplayMode(self, mode):
         return mode
 
+    def getIcon(self):
+        return ""
+
     def dumps(self):
         return None
 
@@ -391,49 +311,36 @@ def create_t2_internal(
     crest_truncation=None,
     document=None,
 ):
-    """Create one corrected parametric T2 / M42x0.75 internal sleeve."""
     doc = document or App.ActiveDocument
     if doc is None:
         doc = App.newDocument("OpticalThreads")
 
-    obj = doc.addObject("PartDesign::FeaturePython", "T2_M42x0_75_Internal_v02")
-    obj.Label = "T2 M42x0.75 Internal Thread v0.2 - Deep Root"
-
+    obj = doc.addObject("PartDesign::FeaturePython", "T2_M42x0_75_Internal")
+    obj.Label = "T2 M42x0.75 Internal Thread v0.1.3"
     T2InternalThreadProxy(obj)
     if Gui:
         T2InternalViewProvider(obj.ViewObject)
 
     obj.Length = float(length)
     obj.WallThickness = float(wall_thickness)
+    obj.Fit = fit if fit in FIT_PRESETS else "FDM print"
 
-    valid_fits = list(FIT_PRESETS.keys())
-    if fit not in valid_fits:
-        fit = "FDM print"
-    obj.Fit = fit
-
-    if fit == "Custom":
+    if obj.Fit == "Custom":
         if custom_clearance is not None:
             obj.DiametralClearance = float(custom_clearance)
         if root_relief is not None:
             obj.RootRelief = float(root_relief)
         if crest_truncation is not None:
             obj.CrestTruncation = float(crest_truncation)
-    else:
-        obj.DiametralClearance = FIT_PRESETS[fit]
-        obj.RootRelief = ROOT_RELIEF_PRESETS[fit]
-        obj.CrestTruncation = CREST_TRUNC_PRESETS[fit]
 
     doc.recompute()
-
     if Gui:
         Gui.activeDocument().activeView().viewAxonometric()
         Gui.activeDocument().activeView().fitAll()
-
     return obj
 
 
 def _show_dialog():
-    """Creation dialog. Falls back to FDM defaults in headless mode."""
     if Gui is None:
         return create_t2_internal()
 
@@ -441,13 +348,10 @@ def _show_dialog():
         from PySide import QtGui
         QtWidgets = QtGui
     except Exception:
-        try:
-            from PySide2 import QtWidgets
-        except Exception:
-            return create_t2_internal()
+        from PySide2 import QtWidgets
 
     dlg = QtWidgets.QDialog()
-    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.2")
+    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.1.3")
     layout = QtWidgets.QFormLayout(dlg)
 
     length_box = QtWidgets.QDoubleSpinBox()
@@ -470,7 +374,7 @@ def _show_dialog():
     fit_box.setCurrentText("FDM print")
 
     clearance_box = QtWidgets.QDoubleSpinBox()
-    clearance_box.setRange(-0.50, 2.00)
+    clearance_box.setRange(-0.5, 2.0)
     clearance_box.setDecimals(3)
     clearance_box.setSingleStep(0.05)
     clearance_box.setValue(FIT_PRESETS["FDM print"])
@@ -493,15 +397,13 @@ def _show_dialog():
     def fit_changed(name):
         name = str(name)
         custom = name == "Custom"
-
+        clearance_box.setEnabled(custom)
+        root_box.setEnabled(custom)
+        crest_box.setEnabled(custom)
         if not custom:
             clearance_box.setValue(FIT_PRESETS[name])
             root_box.setValue(ROOT_RELIEF_PRESETS[name])
             crest_box.setValue(CREST_TRUNC_PRESETS[name])
-
-        clearance_box.setEnabled(custom)
-        root_box.setEnabled(custom)
-        crest_box.setEnabled(custom)
 
     fit_box.currentTextChanged.connect(fit_changed)
     fit_changed("FDM print")
@@ -515,8 +417,8 @@ def _show_dialog():
     layout.addRow("Crest truncation:", crest_box)
 
     info = QtWidgets.QLabel(
-        "FDM default keeps pitch unchanged, cuts the root 0.10 mm deeper\n"
-        "radially, and removes 0.05 mm radially from the crest."
+        "FDM default: 0.20 mm diametral clearance, 0.10 mm deeper root\n"
+        "radially, and 0.05 mm radial crest truncation. Pitch remains 0.75 mm."
     )
     layout.addRow(info)
 
@@ -533,15 +435,11 @@ def _show_dialog():
             length=length_box.value(),
             wall_thickness=wall_box.value(),
             fit=fit,
-            custom_clearance=clearance_box.value(),
-            root_relief=root_box.value(),
-            crest_truncation=crest_box.value(),
+            custom_clearance=(clearance_box.value() if fit == "Custom" else None),
+            root_relief=(root_box.value() if fit == "Custom" else None),
+            crest_truncation=(crest_box.value() if fit == "Custom" else None),
         )
-
     return None
 
 
-if __name__ == "__main__":
-    _show_dialog()
-else:
-    _show_dialog()
+_show_dialog()
