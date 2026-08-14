@@ -2,12 +2,12 @@
 
 A small FreeCAD project for generating **real, printable optical/camera/telescope threads** without manually sketching and debugging a helix every time.
 
-## v0.2 scope
+## Current v0.1 scope
 
 The current generator creates:
 
 - **T2 / M42 × 0.75 internal thread**
-- 60° metric-style V thread
+- 60° metric-style thread geometry
 - Parametric thread/sleeve length
 - Parametric wall thickness
 - Practical fit presets
@@ -34,9 +34,9 @@ This project puts the standard and geometry behind a simple generator.
 
 The macro opens a small dialog. The generated object remains parametric after creation.
 
-## v0.2 fit model
+## v0.1.3 fit model
 
-The v0.2 correction is based on print testing: clearance must not be obtained by simply making the complete thread profile shallower.
+The v0.1.3 correction is based on print testing: clearance must not be obtained by simply making the complete thread profile shallower.
 
 Three parameters are now separated:
 
@@ -44,7 +44,9 @@ Three parameters are now separated:
 - `RootRelief`: cuts the thread valley/root deeper, radially.
 - `CrestTruncation`: removes material from the thread crest/summit, radially.
 
-Pitch and helix geometry are left unchanged.
+Pitch and helix geometry remain unchanged.
+
+The corrected geometry is built on the more robust v0.1.2 swept-profile implementation, including the cylinder seam workaround and a four-sided cutter with finite flats to reduce OCC sweep/Boolean failures.
 
 ### FDM print default
 
@@ -95,7 +97,7 @@ The selected print-fit corrections are then applied independently to the crest a
 
 Target: FreeCAD 1.x.
 
-The macro uses FreeCAD's `Part` geometry API (`makeHelix`, sweep/pipe shell, Boolean cut) and creates a `PartDesign::FeaturePython` object.
+The macro uses FreeCAD's `Part` geometry API (`makeLongHelix`/`makeHelix`, sweep/pipe shell, Boolean cut) and creates a `PartDesign::FeaturePython` object.
 
 ## License
 
