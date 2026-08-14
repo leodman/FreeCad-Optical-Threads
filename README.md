@@ -94,7 +94,7 @@ Printer, resin, filament, machining process, material, and the mating commercial
 ## Planned next steps
 
 - M42 × 0.75 external
-- A paired fit mode that creates matching male/female test coupons
+- Paired male/female generation so printed parts are generated as a matched pair
 - Additional optical standards:
   - M48 × 0.75
   - M28.5 × 0.6 (1.25-inch filters)

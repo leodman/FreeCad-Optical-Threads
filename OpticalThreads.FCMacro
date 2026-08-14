@@ -152,7 +152,7 @@ class T2InternalThreadProxy:
         if root_relief < 0 or crest_trunc < 0:
             raise ValueError("RootRelief and CrestTruncation must be >= 0")
 
-        # ISO metric basic female-thread minor diameter.
+        # ISO metric basic internal-thread minor diameter.
         basic_minor_d = d - 1.082531754 * p
 
         # v0.1.3 correction:
@@ -250,6 +250,11 @@ class T2InternalThreadProxy:
         except Exception:
             pass
 
+        if result.isNull():
+            raise RuntimeError("Thread generation produced a null shape")
+        if hasattr(result, "isValid") and not result.isValid():
+            raise RuntimeError("Thread generation produced an invalid shape")
+
         obj.Shape = result
 
         if bool(obj.DebugObjects):
@@ -344,6 +349,7 @@ def create_t2_internal(
 
 
 def _show_dialog():
+    """Creation dialog. Falls back to FDM defaults in headless mode."""
     if Gui is None:
         return create_t2_internal()
 
@@ -395,6 +401,20 @@ def _show_dialog():
     crest_box.setSuffix(" mm radial")
     crest_box.setValue(CREST_TRUNC_PRESETS["FDM print"])
 
+    root_box = QtWidgets.QDoubleSpinBox()
+    root_box.setRange(0.0, 1.0)
+    root_box.setDecimals(3)
+    root_box.setSingleStep(0.025)
+    root_box.setValue(ROOT_RELIEF_PRESETS["FDM print"])
+    root_box.setSuffix(" mm radial")
+
+    crest_box = QtWidgets.QDoubleSpinBox()
+    crest_box.setRange(0.0, 0.5)
+    crest_box.setDecimals(3)
+    crest_box.setSingleStep(0.025)
+    crest_box.setValue(CREST_TRUNC_PRESETS["FDM print"])
+    crest_box.setSuffix(" mm radial")
+
     def fit_changed(name):
         name = str(name)
         custom = name == "Custom"
@@ -440,7 +460,11 @@ def _show_dialog():
             root_relief=(root_box.value() if fit == "Custom" else None),
             crest_truncation=(crest_box.value() if fit == "Custom" else None),
         )
+
     return None
 
 
-_show_dialog()
+if __name__ == "__main__":
+    _show_dialog()
+else:
+    _show_dialog()
