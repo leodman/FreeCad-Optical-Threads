@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-FreeCAD Optical Threads - v0.1.5
+FreeCAD Optical Threads - v0.1.7
 T2 / M42 x 0.75 internal threaded sleeve generator.
 
 Print-test corrections:
@@ -11,11 +11,16 @@ Print-test corrections:
 - keep diametral fit clearance as a separate parameter
 - compensate material/process shrinkage with a user-editable percentage
 
+Boolean-safety correction in v0.1.7:
+- KEEP the known-working v0.1.5 helix, sweep, profile and intersection geometry
+- repair only the final boolean result after the thread cut succeeds
+- rebuild SameParameter / p-curve consistency on the final BRep
+- heal tolerances, refine, then repair once more
+
 The selected material/process supplies a nominal shrinkage value. For
 "3D PETG" the nominal default is 0.7%, but the user can change the percentage
 for a particular printer/material/process without changing the thread fit.
 
-Built on the robust v0.1.2 swept-profile method.
 License: MIT
 """
 
@@ -63,6 +68,63 @@ MATERIAL_PROCESS_PRESETS = {
     "No compensation": 0.0,
     "3D PETG": 0.7,
 }
+
+
+def _repair_final_brep(shape):
+    """Repair the already-successful thread boolean without changing its geometry."""
+    if shape is None or shape.isNull():
+        raise RuntimeError("Cannot repair a null thread shape")
+
+    repaired = shape.copy()
+
+    # InvalidCurveOnSurface is commonly caused by a mismatch between an
+    # edge's 3D curve and its 2D p-curve on the supporting face. SameParameter
+    # asks OCCT to restore that consistency while preserving the shape.
+    try:
+        Part.ShapeFix.sameParameter(repaired, True, 1.0e-7)
+    except Exception:
+        pass
+
+    # Heal small BRep tolerance/topology inconsistencies only. The upper
+    # tolerance is intentionally tiny relative to an M42x0.75 thread.
+    try:
+        repaired.fix(1.0e-7, 1.0e-7, 1.0e-4)
+    except TypeError:
+        try:
+            repaired.fix()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    try:
+        refined = repaired.removeSplitter()
+        if refined is not None and not refined.isNull():
+            repaired = refined
+    except Exception:
+        pass
+
+    # Refinement may recreate edge/face parameterization, so repair again.
+    try:
+        Part.ShapeFix.sameParameter(repaired, True, 1.0e-7)
+    except Exception:
+        pass
+
+    try:
+        repaired.fix(1.0e-7, 1.0e-7, 1.0e-4)
+    except Exception:
+        pass
+
+    if repaired.isNull():
+        raise RuntimeError("Final BRep repair returned a null shape")
+    if len(repaired.Solids) != 1:
+        raise RuntimeError(
+            "Final thread must contain exactly one solid; got %d" % len(repaired.Solids)
+        )
+    if hasattr(repaired, "isValid") and not repaired.isValid():
+        raise RuntimeError("Final BRep remains invalid after repair")
+
+    return repaired
 
 
 class T2InternalThreadProxy:
@@ -147,11 +209,10 @@ class T2InternalThreadProxy:
         obj.addProperty("App::PropertyLength", "CADPitch", "Information")
         obj.addProperty("App::PropertyString", "ProfileNote", "Information")
         obj.ProfileNote = (
-            "v0.1.5: M42x0.75, 60 degree internal profile. "
-            "Clearance, root relief and crest truncation are independent. "
-            "MaterialProcess loads a nominal shrinkage value; ShrinkagePercent "
-            "is user-editable and inverse compensation is applied to all generated "
-            "linear dimensions so the cooled part targets the nominal geometry."
+            "v0.1.7: M42x0.75, 60 degree internal profile. "
+            "Geometry generation is unchanged from working v0.1.5. "
+            "After the successful thread cut, the final BRep is repaired for "
+            "SameParameter/p-curve consistency and later boolean operations."
         )
 
         # Nominal thread definition and calculated results are read-only.
@@ -247,6 +308,12 @@ class T2InternalThreadProxy:
         obj.EffectiveRootDiameter = root_d
         obj.EffectiveRadialDepth = depth
 
+        # ------------------------------------------------------------------
+        # IMPORTANT: everything from here through sleeve.cut(cutter) is the
+        # known-working v0.1.5 construction. Do not change it as part of BRep
+        # repair work; v0.1.6 showed that changing helix construction can move
+        # the swept tool enough that it no longer intersects the sleeve.
+        # ------------------------------------------------------------------
         eps = max(0.03, 0.04 * p)
         outer = Part.makeCylinder(r_outer, length)
         bore = Part.makeCylinder(
@@ -311,10 +378,9 @@ class T2InternalThreadProxy:
         if hasattr(result, "isValid") and not result.isValid():
             raise RuntimeError("Thread boolean cut produced an invalid shape")
 
-        try:
-            result = result.removeSplitter()
-        except Exception:
-            pass
+        # v0.1.7: only now, after the known-working cut succeeded, repair the
+        # final BRep. No change is made to helix/sweep placement or dimensions.
+        result = _repair_final_brep(result)
 
         obj.Shape = result
 
@@ -387,7 +453,7 @@ def create_t2_internal(
         doc = App.newDocument("OpticalThreads")
 
     obj = doc.addObject("PartDesign::FeaturePython", "T2_M42x0_75_Internal")
-    obj.Label = "T2 M42x0.75 Internal Thread v0.1.5"
+    obj.Label = "T2 M42x0.75 Internal Thread v0.1.7"
     T2InternalThreadProxy(obj)
     if Gui:
         T2InternalViewProvider(obj.ViewObject)
@@ -432,7 +498,7 @@ def _show_dialog():
         from PySide2 import QtWidgets
 
     dlg = QtWidgets.QDialog()
-    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.1.5")
+    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.1.7")
     layout = QtWidgets.QFormLayout(dlg)
 
     length_box = QtWidgets.QDoubleSpinBox()
@@ -520,7 +586,7 @@ def _show_dialog():
     note = QtWidgets.QLabel(
         "3D PETG defaults to 0.7% shrinkage, but the percentage is editable.\n"
         "Compensation uses the exact inverse: scale = 1/(1 - shrinkage).\n"
-        "Fit/profile settings stay independent from material compensation."
+        "v0.1.7 preserves the working thread construction and repairs the final BRep."
     )
     layout.addRow(note)
 
