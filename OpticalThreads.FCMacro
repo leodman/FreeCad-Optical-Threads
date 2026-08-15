@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""FreeCAD Optical Threads - v0.4.0
+"""FreeCAD Optical Threads - v0.4.1
 Native parametric internal/external optical-thread generator.
 """
 
@@ -184,7 +184,7 @@ def _metadata(body, thread, geom, fit_name, material, shrink, scale, kind, metho
 def _make_internal(doc, thread, geom, fit_name, material, shrink, scale, right_hand=True, lead_in=False):
     designation = thread["designation"]
     body = doc.addObject("PartDesign::Body", "OpticalThread_%s_Internal" % _safe_name(designation))
-    body.Label = "%s Internal Thread v0.4.0" % designation
+    body.Label = "%s Internal Thread v0.4.1" % designation
     _metadata(body, thread, geom, fit_name, material, shrink, scale,
               "Internal / female", "Native Additive/SubtractiveCylinder + Sketcher + SubtractiveHelix")
     _add_prop(body, "App::PropertyLength", "RootRelief", "Fit", geom["root_relief_nominal"])
@@ -253,22 +253,33 @@ def _make_internal(doc, thread, geom, fit_name, material, shrink, scale, right_h
 def _make_external(doc, thread, geom, fit_name, material, shrink, scale, right_hand=True):
     designation = thread["designation"]
     body = doc.addObject("PartDesign::Body", "OpticalThread_%s_External" % _safe_name(designation))
-    body.Label = "%s External Thread v0.4.0" % designation
+    body.Label = "%s External Thread v0.4.1" % designation
     _metadata(body, thread, geom, fit_name, material, shrink, scale,
-              "External / male", "Native AdditiveCylinder + Sketcher + AdditiveHelix")
+              "External / male", "Native extended AdditiveCylinder + Sketcher + AdditiveHelix")
     _add_prop(body, "App::PropertyString", "ClearanceApplication", "Fit", "Pair clearance applied to female geometry")
     _add_prop(body, "App::PropertyLength", "EffectiveMajorDiameter", "Information", geom["major_diameter"])
     _add_prop(body, "App::PropertyLength", "EffectiveRootDiameter", "Information", geom["root_diameter"])
 
+    p = geom["cad_pitch"]
+
+    # The helix is intentionally extended one pitch beyond each requested end.
+    # Extend the male core by the same amount so the first and last turns are
+    # fully supported instead of floating beyond the cylinder.
     core = body.newObject("PartDesign::AdditiveCylinder", "ThreadCore")
-    core.Radius, core.Height, core.Angle = geom["r_root"], geom["body_length"], 360
+    core.Radius = geom["r_root"]
+    core.Height = geom["body_length"] + 2.0 * p
+    core.Angle = 360
+    core.Placement = App.Placement(
+        App.Vector(0, 0, -p),
+        App.Rotation(App.Vector(0, 0, 1), 0),
+    )
     doc.recompute()
     _validate_feature(core, "Male core")
 
     profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
     profile.AttachmentSupport = body.Origin.OriginFeatures[4]
     profile.MapMode = "FlatFace"
-    p, z0 = geom["cad_pitch"], -geom["cad_pitch"]
+    z0 = -p
     overlap = max(0.01 * scale, 0.015)
     r_base = geom["r_root"] - overlap
     q1 = App.Vector(r_base, z0 - geom["half_width"], 0)
@@ -376,7 +387,7 @@ def _show_dialog():
         from PySide2 import QtWidgets
 
     dlg = QtWidgets.QDialog()
-    dlg.setWindowTitle("FreeCAD Optical Threads v0.4.0")
+    dlg.setWindowTitle("FreeCAD Optical Threads v0.4.1")
     layout = QtWidgets.QFormLayout(dlg)
 
     output_box = QtWidgets.QComboBox(); [output_box.addItem(x) for x in OUTPUT_MODES]; output_box.setCurrentText("Matched pair")
@@ -425,11 +436,12 @@ def _show_dialog():
     layout.addRow("Shrinkage / compression:", shrinkage_box); layout.addRow("Pair diametral clearance:", clearance_box)
     layout.addRow("Female root relief:", root_box); layout.addRow("Female crest truncation:", crest_box)
     layout.addRow("Experimental female lead-in:", lead_box)
-    layout.addRow(QtWidgets.QLabel("v0.4.0: native SubtractiveHelix / AdditiveHelix. Matched pair shares one parameter set."))
+    layout.addRow(QtWidgets.QLabel("v0.4.1: male core now supports the full extended AdditiveHelix. Matched pair shares one parameter set."))
 
     buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
     buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject); layout.addRow(buttons)
-    if not dlg.exec_(): return None
+    dialog_result = dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()
+    if not dialog_result: return None
 
     standard, fit, output = str(standard_box.currentText()), str(fit_box.currentText()), str(output_box.currentText())
     kwargs = dict(
