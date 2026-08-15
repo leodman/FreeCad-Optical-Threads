@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-FreeCAD Optical Threads - v0.3.1
+FreeCAD Optical Threads - v0.3.2
 Parametric native Part Design optical-thread generator.
 
 Design rules:
@@ -9,10 +9,10 @@ Design rules:
 - generated parts remain editable native FreeCAD feature trees
 - use native Part Design / Sketcher features before low-level custom BRep geometry
 
-v0.3.1:
-- preserves the native SubtractiveHelix architecture proven in v0.2.0
-- makes the conical lead-in optional and OFF by default
-- when enabled, the lead-in slightly overcuts the bore to avoid exact tangent/coincident faces
+v0.3.2:
+- preserves the Boolean-safe native v0.3.1 geometry engine unchanged
+- adds the common 1.25-inch astronomy filter/eyepiece thread M28.5 x 0.6
+- conical lead-in remains optional and OFF by default
 
 License: MIT
 """
@@ -35,6 +35,14 @@ THREAD_STANDARDS = {
         "pitch": 0.75,
         "profile_angle": 60.0,
         "family": "ISO metric 60 degree profile",
+        "verified": True,
+    },
+    "1.25in Filter / M28.5 x 0.6": {
+        "designation": "1.25in Filter / M28.5 x 0.6",
+        "diameter": 28.5,
+        "pitch": 0.6,
+        "profile_angle": 60.0,
+        "family": "Astronomy 1.25-inch filter/eyepiece metric thread",
         "verified": True,
     },
     "Custom metric": None,
@@ -231,7 +239,7 @@ def _create_native_internal_thread(
     safe_name = designation.replace(" ", "_").replace("/", "").replace(".", "_")
 
     body = doc.addObject("PartDesign::Body", "OpticalThread_%s_Internal" % safe_name)
-    body.Label = "%s Internal Thread v0.3.1" % designation
+    body.Label = "%s Internal Thread v0.3.2" % designation
 
     _add_info_property(body, "App::PropertyString", "ThreadDesignation", "Thread", designation)
     _add_info_property(body, "App::PropertyString", "ThreadFamily", "Thread", thread["family"])
@@ -276,10 +284,6 @@ def _create_native_internal_thread(
     doc.recompute()
     _validate_feature(bore, "Native Part Design sleeve/bore")
 
-    # Optional lead-in. Kept OFF by default because the v0.2.0 no-lead-in chain
-    # has already demonstrated robust downstream Part booleans.
-    # If enabled, deliberately overcut the bore very slightly so the cone never
-    # terminates exactly tangent/coincident with the cylindrical bore surface.
     lead_feature = None
     if lead_in:
         lead_overcut = max(0.01 * compensation_scale, 0.015)
@@ -392,6 +396,11 @@ def create_t2_internal(**kwargs):
     return create_internal_thread(**kwargs)
 
 
+def create_1_25_filter_internal(**kwargs):
+    kwargs["standard"] = "1.25in Filter / M28.5 x 0.6"
+    return create_internal_thread(**kwargs)
+
+
 def _show_dialog():
     if Gui is None:
         return create_internal_thread()
@@ -403,7 +412,7 @@ def _show_dialog():
         from PySide2 import QtWidgets
 
     dlg = QtWidgets.QDialog()
-    dlg.setWindowTitle("FreeCAD Optical Threads v0.3.1")
+    dlg.setWindowTitle("FreeCAD Optical Threads v0.3.2")
     layout = QtWidgets.QFormLayout(dlg)
 
     standard_box = QtWidgets.QComboBox()
@@ -524,8 +533,8 @@ def _show_dialog():
     layout.addRow("Experimental conical lead-in:", lead_box)
 
     note = QtWidgets.QLabel(
-        "v0.3.1: native Part Design thread engine.\n"
-        "Lead-in is OFF by default to preserve the proven Boolean-safe helix chain."
+        "v0.3.2: native Part Design thread engine.\n"
+        "Presets: T2 M42x0.75 and 1.25in filter M28.5x0.6. Lead-in OFF by default."
     )
     layout.addRow(note)
 
