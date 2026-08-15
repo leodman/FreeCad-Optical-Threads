@@ -2,18 +2,19 @@
 
 A small FreeCAD project for generating **real, printable optical/camera/telescope threads** without manually sketching and debugging a helix every time.
 
-## Current v0.1 scope
+## develop/v0.1 scope
 
-The current generator creates:
+The current development generator creates:
 
 - **T2 / M42 × 0.75 internal thread**
-- 60° metric-style thread geometry
+- 60° metric-style profile
 - Parametric thread/sleeve length
 - Parametric wall thickness
 - Practical fit presets
 - Independent diametral clearance
-- Independent root relief (deeper thread valley)
-- Independent crest truncation
+- Independent root/valley relief
+- Independent crest/summit truncation
+- **Material/process shrinkage compensation**
 - Recomputes when parameters change
 
 The output is a normal FreeCAD solid that can be fused, cut, linked, cloned, or used as a building block in a larger model.
@@ -34,50 +35,93 @@ This project puts the standard and geometry behind a simple generator.
 
 The macro opens a small dialog. The generated object remains parametric after creation.
 
-## v0.1.3 fit model
+## v0.1.3 print-fit correction
 
-The v0.1.3 correction is based on print testing: clearance must not be obtained by simply making the complete thread profile shallower.
+Physical print testing showed that simply adding clearance was not enough. The printed M42 × 0.75 female thread could engage only after the sleeve was slit so it could flex outward, and comparison with a known-good metal thread showed that the generated thread valley was too shallow.
 
-Three parameters are now separated:
+The correction in v0.1.3 is therefore geometric:
 
-- `DiametralClearance`: shifts the female thread outward for fit.
-- `RootRelief`: cuts the thread valley/root deeper, radially.
-- `CrestTruncation`: removes material from the thread crest/summit, radially.
+- **Pitch remains nominally 0.75 mm.**
+- Fit clearance does not substitute for thread depth.
+- `RootRelief` cuts the female valley/root farther outward radially.
+- `CrestTruncation` removes material from the female summit/crest independently.
+- `DiametralClearance` remains an independent mating-fit parameter.
 
-Pitch and helix geometry remain unchanged.
+For the current **FDM print** preset:
 
-The corrected geometry is built on the more robust v0.1.2 swept-profile implementation, including the cylinder seam workaround and a four-sided cutter with finite flats to reduce OCC sweep/Boolean failures.
-
-### FDM print default
-
-| Parameter | Default |
+| Parameter | Value |
 |---|---:|
-| Diametral clearance | +0.20 mm diameter |
+| Diametral clearance | +0.20 mm |
 | Root relief | +0.10 mm radial |
 | Crest truncation | +0.05 mm radial |
 
-For M42 × 0.75 this gives approximately:
+For M42 × 0.75, the macro uses the ISO-style basic internal minor diameter:
+
+`D1 = D - 1.082531754 × P`
+
+Without material compensation, the FDM preset gives approximately:
 
 - Basic internal minor diameter: **41.1881 mm**
 - Effective female crest diameter: **41.4881 mm**
 - Effective female root diameter: **42.4000 mm**
 - Effective radial groove depth: **0.4560 mm**
 
-The practical fit presets are not certified ISO tolerance classes such as 6H/6g. Printer, resin, filament, machining process, material, and the mating commercial part can all require adjustment.
+The important design rule is that **print clearance and thread depth are separate controls**. The generator may truncate the thread summit for printability, but it should still carve the valley fully enough to avoid the shallow-thread failure seen in the first printed test.
+
+## v0.1.4 material/process compensation
+
+A later PETG print measured about **41.20 mm** at the female inner/crest diameter, versus about **41.49 mm** in the uncompensated CAD geometry. That is roughly 0.7% at this size, so v0.1.4 adds a single **Material / process** selection.
+
+Current choices:
+
+| Material / process | Assumed linear shrinkage |
+|---|---:|
+| No compensation | 0.0% |
+| 3D PETG - 0.7% shrinkage | 0.7% |
+
+The PETG preset does **not** merely add 0.7% to one diameter. It applies the exact inverse linear compensation:
+
+`scale = 1 / (1 - 0.007) = 1.007049345...`
+
+This scale is applied consistently to all generated linear CAD dimensions:
+
+- nominal diameter
+- pitch
+- thread/sleeve length
+- wall thickness
+- diametral clearance
+- root relief
+- crest truncation
+- small geometric robustness allowances used by the swept cutter
+
+The intention is that, after an assumed 0.7% linear shrinkage, the cooled part returns to the requested nominal geometry. Thus the CAD pitch for the PETG preset is about **0.75529 mm**, which should shrink back toward **0.750 mm**.
+
+For the M42 × 0.75 FDM preset with PETG 0.7% compensation, the CAD female crest diameter is approximately **41.780 mm**; after 0.7% ideal linear shrinkage it returns to approximately **41.488 mm**.
+
+This is an empirical printing compensation, not a universal PETG material constant. Actual dimensional behavior depends on filament formulation, printer, nozzle, extrusion calibration, temperature, cooling, print orientation, and slicer settings.
+
+## Fit presets
+
+These are practical printing/machining presets, not certified ISO tolerance classes such as 6H/6g.
+
+| Fit | Diametral clearance | Root relief | Crest truncation |
+|---|---:|---:|---:|
+| Basic / nominal | 0.00 mm | 0.00 mm | 0.00 mm |
+| Close | +0.05 mm | 0.00 mm | 0.00 mm |
+| Normal | +0.10 mm | 0.00 mm | 0.00 mm |
+| Loose | +0.20 mm | +0.05 mm radial | +0.025 mm radial |
+| FDM print | +0.20 mm | +0.10 mm radial | +0.05 mm radial |
+| Custom | user selected | user selected | user selected |
+
+Printer, resin, filament, machining process, material, and the mating commercial part can all require adjustment. Short test rings are recommended before printing a final adapter.
 
 ## T2 geometry
 
 - Designation: **M42 × 0.75**
 - Nominal diameter: **42.0 mm**
-- Pitch: **0.75 mm**
+- Nominal pitch: **0.75 mm**
 - Thread angle: **60°**
 - Default hand: right-hand
-
-For the basic internal minor diameter the macro uses:
-
-`D1 = D - 1.082531754 × P`
-
-The selected print-fit corrections are then applied independently to the crest and root geometry.
 
 ## Planned next steps
 
@@ -88,6 +132,7 @@ The selected print-fit corrections are then applied independently to the crest a
   - M28.5 × 0.6 (1.25-inch filters)
   - C-mount 1"-32 UN
   - SM1 / 1.035"-40
+- More material/process compensation presets as they are physically calibrated
 - Entry chamfer/runout controls
 - Convert the macro into a proper **Optical Threads Workbench**
 - Thread library stored as data rather than hard-coded UI entries
@@ -97,7 +142,7 @@ The selected print-fit corrections are then applied independently to the crest a
 
 Target: FreeCAD 1.x.
 
-The macro uses FreeCAD's `Part` geometry API (`makeLongHelix`/`makeHelix`, sweep/pipe shell, Boolean cut) and creates a `PartDesign::FeaturePython` object.
+The macro uses FreeCAD's `Part` geometry API (`makeHelix` / `makeLongHelix`, sweep/pipe shell, Boolean cut) and creates a `PartDesign::FeaturePython` object.
 
 ## License
 

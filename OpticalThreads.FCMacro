@@ -1,14 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-FreeCAD Optical Threads - v0.1.3
+FreeCAD Optical Threads - v0.1.5
 T2 / M42 x 0.75 internal threaded sleeve generator.
 
-Correction from print testing:
-- preserve thread pitch/helix
+Print-test corrections:
+- preserve intended final thread pitch/helix
 - do not obtain fit by making the whole thread shallower
 - deepen the female root/valley independently
 - truncate the female crest/summit independently
 - keep diametral fit clearance as a separate parameter
+- compensate material/process shrinkage with a user-editable percentage
+
+The selected material/process supplies a nominal shrinkage value. For
+"3D PETG" the nominal default is 0.7%, but the user can change the percentage
+for a particular printer/material/process without changing the thread fit.
 
 Built on the robust v0.1.2 swept-profile method.
 License: MIT
@@ -51,12 +56,21 @@ CREST_TRUNC_PRESETS = {
     "Custom": None,
 }
 
+# Nominal expected linear shrinkage percentages after printing/cooling.
+# Selecting a material/process loads this value into ShrinkagePercent.
+# ShrinkagePercent itself remains editable by the user.
+MATERIAL_PROCESS_PRESETS = {
+    "No compensation": 0.0,
+    "3D PETG": 0.7,
+}
+
 
 class T2InternalThreadProxy:
     Type = "FreeCADOpticalThreads::T2Internal"
 
     def __init__(self, obj):
         obj.Proxy = self
+
         obj.addProperty("App::PropertyString", "ThreadDesignation", "Thread")
         obj.ThreadDesignation = "T2 / M42 x 0.75 internal"
         obj.addProperty("App::PropertyLength", "NominalDiameter", "Thread")
@@ -96,6 +110,30 @@ class T2InternalThreadProxy:
         )
         obj.CrestTruncation = CREST_TRUNC_PRESETS["FDM print"]
 
+        obj.addProperty(
+            "App::PropertyEnumeration",
+            "MaterialProcess",
+            "Print compensation",
+            "Material/process preset. Selecting one loads its nominal shrinkage percentage.",
+        )
+        obj.MaterialProcess = list(MATERIAL_PROCESS_PRESETS.keys())
+        obj.MaterialProcess = "3D PETG"
+
+        obj.addProperty(
+            "App::PropertyFloat",
+            "ShrinkagePercent",
+            "Print compensation",
+            "Expected linear shrinkage/compression percentage. Editable; PETG nominal is 0.7%.",
+        )
+        obj.ShrinkagePercent = MATERIAL_PROCESS_PRESETS["3D PETG"]
+
+        obj.addProperty(
+            "App::PropertyFloat",
+            "CompensationScale",
+            "Print compensation",
+            "Computed CAD linear scale factor = 1/(1-shrinkage).",
+        )
+
         obj.addProperty("App::PropertyBool", "RightHand", "Thread")
         obj.RightHand = True
         obj.addProperty("App::PropertyAngle", "SeamOffset", "Advanced")
@@ -106,21 +144,27 @@ class T2InternalThreadProxy:
         obj.addProperty("App::PropertyLength", "EffectiveCrestDiameter", "Information")
         obj.addProperty("App::PropertyLength", "EffectiveRootDiameter", "Information")
         obj.addProperty("App::PropertyLength", "EffectiveRadialDepth", "Information")
+        obj.addProperty("App::PropertyLength", "CADPitch", "Information")
         obj.addProperty("App::PropertyString", "ProfileNote", "Information")
         obj.ProfileNote = (
-            "v0.1.3: M42x0.75, 60 degree internal profile. "
-            "D1=D-1.082531754*P. Clearance, root relief and crest truncation "
-            "are independent; RootRelief deepens the valley instead of "
-            "reducing thread depth to obtain fit."
+            "v0.1.5: M42x0.75, 60 degree internal profile. "
+            "Clearance, root relief and crest truncation are independent. "
+            "MaterialProcess loads a nominal shrinkage value; ShrinkagePercent "
+            "is user-editable and inverse compensation is applied to all generated "
+            "linear dimensions so the cooled part targets the nominal geometry."
         )
 
+        # Nominal thread definition and calculated results are read-only.
+        # ShrinkagePercent intentionally remains editable.
         for name in (
             "ThreadDesignation",
             "NominalDiameter",
             "Pitch",
+            "CompensationScale",
             "EffectiveCrestDiameter",
             "EffectiveRootDiameter",
             "EffectiveRadialDepth",
+            "CADPitch",
             "ProfileNote",
         ):
             obj.setEditorMode(name, 1)
@@ -138,24 +182,54 @@ class T2InternalThreadProxy:
             if crest is not None:
                 obj.CrestTruncation = crest
 
+        elif prop == "MaterialProcess":
+            nominal_percent = MATERIAL_PROCESS_PRESETS.get(str(obj.MaterialProcess))
+            if nominal_percent is not None:
+                obj.ShrinkagePercent = nominal_percent
+
     def execute(self, obj):
-        d = float(obj.NominalDiameter.Value)
-        p = float(obj.Pitch.Value)
-        length = float(obj.Length.Value)
-        wall = float(obj.WallThickness.Value)
-        clearance_d = float(obj.DiametralClearance.Value)
-        root_relief = float(obj.RootRelief.Value)
-        crest_trunc = float(obj.CrestTruncation.Value)
+        d_nominal = float(obj.NominalDiameter.Value)
+        p_nominal = float(obj.Pitch.Value)
+        length_nominal = float(obj.Length.Value)
+        wall_nominal = float(obj.WallThickness.Value)
+        clearance_nominal = float(obj.DiametralClearance.Value)
+        root_relief_nominal = float(obj.RootRelief.Value)
+        crest_trunc_nominal = float(obj.CrestTruncation.Value)
         seam_offset = float(obj.SeamOffset)
 
-        if min(d, p, length, wall) <= 0:
+        if min(d_nominal, p_nominal, length_nominal, wall_nominal) <= 0:
             raise ValueError("Diameter, pitch, length and wall thickness must be > 0")
-        if root_relief < 0 or crest_trunc < 0:
+        if root_relief_nominal < 0 or crest_trunc_nominal < 0:
             raise ValueError("RootRelief and CrestTruncation must be >= 0")
 
+        shrinkage_percent = float(obj.ShrinkagePercent)
+        if shrinkage_percent < 0.0 or shrinkage_percent >= 100.0:
+            raise ValueError("ShrinkagePercent must be >= 0 and < 100")
+
+        shrinkage = shrinkage_percent / 100.0
+
+        # Exact inverse compensation. For 0.7% shrinkage:
+        # scale = 1 / 0.993 = 1.007049345...
+        scale = 1.0 / (1.0 - shrinkage)
+        obj.CompensationScale = scale
+
+        # Apply the same linear compensation to ALL generated dimensions,
+        # including pitch. After the assumed shrinkage, the intended nominal
+        # M42 x 0.75 dimensions and fit corrections are recovered.
+        d = d_nominal * scale
+        p = p_nominal * scale
+        length = length_nominal * scale
+        wall = wall_nominal * scale
+        clearance_d = clearance_nominal * scale
+        root_relief = root_relief_nominal * scale
+        crest_trunc = crest_trunc_nominal * scale
+
+        obj.CADPitch = p
+
+        # ISO metric basic internal-thread minor diameter, evaluated on the
+        # compensated CAD dimensions.
         basic_minor_d = d - 1.082531754 * p
 
-        # Clearance, crest truncation and root relief are independent.
         crest_d = basic_minor_d + clearance_d + 2.0 * crest_trunc
         root_d = d + clearance_d + 2.0 * root_relief
 
@@ -173,7 +247,6 @@ class T2InternalThreadProxy:
         obj.EffectiveRootDiameter = root_d
         obj.EffectiveRadialDepth = depth
 
-        # Plain sleeve at the truncated female crest/minor diameter.
         eps = max(0.03, 0.04 * p)
         outer = Part.makeCylinder(r_outer, length)
         bore = Part.makeCylinder(
@@ -181,8 +254,6 @@ class T2InternalThreadProxy:
         )
         sleeve = outer.cut(bore)
 
-        # Move the cylinder seam away from the sweep start. Helix and profile
-        # remain aligned with each other; this preserves the robust v0.1.2 method.
         sleeve.rotate(
             App.Vector(0, 0, 0), App.Vector(0, 0, 1), seam_offset
         )
@@ -190,10 +261,9 @@ class T2InternalThreadProxy:
         z0 = -p
         helix_height = length + 2.0 * p
 
-        # Four-sided cutter with finite flats avoids degenerate sharp sweep tips.
-        radial_overlap = max(0.10, 0.25 * depth)
+        radial_overlap = max(0.10 * scale, 0.25 * depth)
         x_inner = r_crest - radial_overlap
-        x_outer = r_root + max(0.04, 0.08 * depth)
+        x_outer = r_root + max(0.04 * scale, 0.08 * depth)
 
         ideal_half_width = depth * math.tan(math.radians(30.0))
         root_half = min(0.36 * p, ideal_half_width + 0.08 * p)
@@ -211,7 +281,6 @@ class T2InternalThreadProxy:
             Part.makeLine(q4, q1),
         ])
 
-        # The helix passes through the section at its start.
         r_spine = x_inner + 0.45 * (x_outer - x_inner)
         try:
             helix = Part.makeLongHelix(
@@ -306,6 +375,8 @@ def create_t2_internal(
     length=8.0,
     wall_thickness=3.0,
     fit="FDM print",
+    material_process="3D PETG",
+    shrinkage_percent=None,
     custom_clearance=None,
     root_relief=None,
     crest_truncation=None,
@@ -316,7 +387,7 @@ def create_t2_internal(
         doc = App.newDocument("OpticalThreads")
 
     obj = doc.addObject("PartDesign::FeaturePython", "T2_M42x0_75_Internal")
-    obj.Label = "T2 M42x0.75 Internal Thread v0.1.3"
+    obj.Label = "T2 M42x0.75 Internal Thread v0.1.5"
     T2InternalThreadProxy(obj)
     if Gui:
         T2InternalViewProvider(obj.ViewObject)
@@ -324,6 +395,16 @@ def create_t2_internal(
     obj.Length = float(length)
     obj.WallThickness = float(wall_thickness)
     obj.Fit = fit if fit in FIT_PRESETS else "FDM print"
+    obj.MaterialProcess = (
+        material_process
+        if material_process in MATERIAL_PROCESS_PRESETS
+        else "No compensation"
+    )
+
+    # Material/process sets the nominal default; caller may override it.
+    obj.ShrinkagePercent = MATERIAL_PROCESS_PRESETS[str(obj.MaterialProcess)]
+    if shrinkage_percent is not None:
+        obj.ShrinkagePercent = float(shrinkage_percent)
 
     if obj.Fit == "Custom":
         if custom_clearance is not None:
@@ -351,20 +432,18 @@ def _show_dialog():
         from PySide2 import QtWidgets
 
     dlg = QtWidgets.QDialog()
-    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.1.3")
+    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.1.5")
     layout = QtWidgets.QFormLayout(dlg)
 
     length_box = QtWidgets.QDoubleSpinBox()
     length_box.setRange(0.75, 200.0)
     length_box.setDecimals(3)
-    length_box.setSingleStep(0.5)
     length_box.setValue(8.0)
     length_box.setSuffix(" mm")
 
     wall_box = QtWidgets.QDoubleSpinBox()
     wall_box.setRange(0.5, 50.0)
     wall_box.setDecimals(3)
-    wall_box.setSingleStep(0.5)
     wall_box.setValue(3.0)
     wall_box.setSuffix(" mm")
 
@@ -373,12 +452,24 @@ def _show_dialog():
         fit_box.addItem(name)
     fit_box.setCurrentText("FDM print")
 
+    material_box = QtWidgets.QComboBox()
+    for name in MATERIAL_PROCESS_PRESETS:
+        material_box.addItem(name)
+    material_box.setCurrentText("3D PETG")
+
+    shrinkage_box = QtWidgets.QDoubleSpinBox()
+    shrinkage_box.setRange(0.0, 20.0)
+    shrinkage_box.setDecimals(3)
+    shrinkage_box.setSingleStep(0.1)
+    shrinkage_box.setSuffix(" %")
+    shrinkage_box.setValue(MATERIAL_PROCESS_PRESETS["3D PETG"])
+
     clearance_box = QtWidgets.QDoubleSpinBox()
     clearance_box.setRange(-0.5, 2.0)
     clearance_box.setDecimals(3)
     clearance_box.setSingleStep(0.05)
-    clearance_box.setValue(FIT_PRESETS["FDM print"])
     clearance_box.setSuffix(" mm dia")
+    clearance_box.setValue(FIT_PRESETS["FDM print"])
 
     root_box = QtWidgets.QDoubleSpinBox()
     root_box.setRange(0.0, 1.0)
@@ -405,22 +496,33 @@ def _show_dialog():
             root_box.setValue(ROOT_RELIEF_PRESETS[name])
             crest_box.setValue(CREST_TRUNC_PRESETS[name])
 
+    def material_changed(name):
+        name = str(name)
+        nominal = MATERIAL_PROCESS_PRESETS.get(name)
+        if nominal is not None:
+            shrinkage_box.setValue(nominal)
+
     fit_box.currentTextChanged.connect(fit_changed)
+    material_box.currentTextChanged.connect(material_changed)
     fit_changed("FDM print")
+    material_changed("3D PETG")
 
     layout.addRow("Thread:", QtWidgets.QLabel("T2 / M42 x 0.75 internal"))
     layout.addRow("Length:", length_box)
     layout.addRow("Wall thickness:", wall_box)
     layout.addRow("Fit:", fit_box)
+    layout.addRow("Material / process:", material_box)
+    layout.addRow("Shrinkage / compression:", shrinkage_box)
     layout.addRow("Diametral clearance:", clearance_box)
     layout.addRow("Root relief (deeper valley):", root_box)
     layout.addRow("Crest truncation:", crest_box)
 
-    info = QtWidgets.QLabel(
-        "FDM default: 0.20 mm diametral clearance, 0.10 mm deeper root\n"
-        "radially, and 0.05 mm radial crest truncation. Pitch remains 0.75 mm."
+    note = QtWidgets.QLabel(
+        "3D PETG defaults to 0.7% shrinkage, but the percentage is editable.\n"
+        "Compensation uses the exact inverse: scale = 1/(1 - shrinkage).\n"
+        "Fit/profile settings stay independent from material compensation."
     )
-    layout.addRow(info)
+    layout.addRow(note)
 
     buttons = QtWidgets.QDialogButtonBox(
         QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
@@ -435,6 +537,8 @@ def _show_dialog():
             length=length_box.value(),
             wall_thickness=wall_box.value(),
             fit=fit,
+            material_process=str(material_box.currentText()),
+            shrinkage_percent=shrinkage_box.value(),
             custom_clearance=(clearance_box.value() if fit == "Custom" else None),
             root_relief=(root_box.value() if fit == "Custom" else None),
             crest_truncation=(crest_box.value() if fit == "Custom" else None),
