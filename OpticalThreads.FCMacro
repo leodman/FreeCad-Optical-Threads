@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""FreeCAD Optical Threads v0.5.2 - native male/female/matched metric threads."""
+"""FreeCAD Optical Threads v0.5.3 - native male/female/matched metric threads.
+
+v0.5.3 locks thread pitch to the nominal standard/custom value. Print
+shrinkage compensation still applies to diameters, lengths, wall thickness
+and fit corrections, but never to helix pitch.
+"""
 import math
 import FreeCAD as App
 import Part, Sketcher
@@ -64,6 +69,7 @@ def _meta(body,s,g,fit,mat,sh,sc,kind):
     _prop(body,"App::PropertyString","ThreadKind","Thread",kind)
     _prop(body,"App::PropertyLength","NominalDiameter","Thread",g["nominal_diameter"])
     _prop(body,"App::PropertyLength","NominalPitch","Thread",g["nominal_pitch"])
+    _prop(body,"App::PropertyLength","CADPitch","Thread",g["cad_pitch"])
     _prop(body,"App::PropertyString","FitPreset","Fit",fit)
     _prop(body,"App::PropertyString","MaterialProcess","Print compensation",mat)
     _prop(body,"App::PropertyFloat","ShrinkagePercent","Print compensation",sh)
@@ -72,7 +78,7 @@ def _meta(body,s,g,fit,mat,sh,sc,kind):
 def _igeom(s,f,sc,length,wall):
     d0,p0=float(s["diameter"]),float(s["pitch"]); L=float(length); W=float(wall)
     if min(d0,p0,L,W)<=0:raise ValueError("Diameter, pitch, length and wall must be > 0")
-    d,p,L,W=d0*sc,p0*sc,L*sc,W*sc
+    d=d0*sc; p=p0; L=L*sc; W=W*sc
     c=f["diametral_clearance"]*sc; rr=f["root_relief"]*sc; ct=f["crest_truncation"]*sc
     crest=d-1.082531754*p+c+2*ct; root=d+c+2*rr
     rc,rrad=crest/2,root/2; ro=d/2+W; depth=rrad-rc
@@ -82,7 +88,8 @@ def _igeom(s,f,sc,length,wall):
 def _egeom(s,f,sc,length,wall):
     d0,p0=float(s["diameter"]),float(s["pitch"]); L=float(length); W=float(wall)
     if min(d0,p0,L,W)<=0:raise ValueError("Diameter, pitch, length and wall must be > 0")
-    d,p,L=d0*sc,p0*sc,L*sc; rm=d/2; rr=(d-1.226869*p)/2; depth=rm-rr
+    d=d0*sc; p=p0; L=L*sc
+    rm=d/2; rr=(d-1.226869*p)/2; depth=rm-rr
     if depth<=0:raise ValueError("Invalid external geometry")
     return dict(nominal_diameter=d0,nominal_pitch=p0,cad_pitch=p,body_length=L,r_major=rm,r_root=rr,thread_depth=depth,half_width=depth*math.tan(math.radians(30)))
 
@@ -101,7 +108,7 @@ def _revolved_cut(doc,body,name,pts,label):
     return cut
 
 def _internal(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
-    b=doc.addObject("PartDesign::Body","OpticalThread_Internal"); b.Label="%s Internal Thread v0.5.2"%s["designation"]; _meta(b,s,g,fit,mat,sh,sc,"Internal / female")
+    b=doc.addObject("PartDesign::Body","OpticalThread_Internal"); b.Label="%s Internal Thread v0.5.3"%s["designation"]; _meta(b,s,g,fit,mat,sh,sc,"Internal / female")
     outer=b.newObject("PartDesign::AdditiveCylinder","SleeveOuter"); outer.Radius=g["r_outer"]; outer.Height=g["body_length"]; outer.Angle=360; doc.recompute()
     eps=max(0.03,0.04*g["cad_pitch"]); bore=b.newObject("PartDesign::SubtractiveCylinder","SleeveBore"); bore.Radius=g["r_crest"]; bore.Height=g["body_length"]+2*eps; bore.Angle=360; bore.Placement=App.Placement(App.Vector(0,0,-eps),App.Rotation()); doc.recompute(); _check(bore,"Internal bore")
     sk=b.newObject("Sketcher::SketchObject","ThreadProfile"); sk.AttachmentSupport=b.Origin.OriginFeatures[4]; sk.MapMode="FlatFace"; p=g["cad_pitch"]; z=-p
@@ -116,7 +123,7 @@ def _internal(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
     b.Tip=tip; doc.recompute(); return b
 
 def _external(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
-    b=doc.addObject("PartDesign::Body","OpticalThread_External"); b.Label="%s External Thread v0.5.2"%s["designation"]; _meta(b,s,g,fit,mat,sh,sc,"External / male")
+    b=doc.addObject("PartDesign::Body","OpticalThread_External"); b.Label="%s External Thread v0.5.3"%s["designation"]; _meta(b,s,g,fit,mat,sh,sc,"External / male")
     p=g["cad_pitch"]; z=-p; overlap=max(0.01*sc,0.015); rb=g["r_root"]-overlap
     sk=b.newObject("Sketcher::SketchObject","ThreadProfile"); sk.AttachmentSupport=b.Origin.OriginFeatures[4]; sk.MapMode="FlatFace"
     a=App.Vector(rb,z-g["half_width"],0); c=App.Vector(g["r_major"],z,0); d=App.Vector(rb,z+g["half_width"],0); sk.addGeometry([Part.LineSegment(a,c),Part.LineSegment(c,d),Part.LineSegment(d,a)],False); doc.recompute()
@@ -155,7 +162,7 @@ def _show_dialog():
         from PySide import QtGui; Q=QtGui
     except Exception:
         from PySide2 import QtWidgets as Q
-    dlg=Q.QDialog();dlg.setWindowTitle("FreeCAD Optical Threads v0.5.2");lay=Q.QFormLayout(dlg)
+    dlg=Q.QDialog();dlg.setWindowTitle("FreeCAD Optical Threads v0.5.3");lay=Q.QFormLayout(dlg)
     out=Q.QComboBox();[out.addItem(x) for x in OUTPUT_MODES];out.setCurrentText("Matched pair")
     std=Q.QComboBox();[std.addItem(x) for x in THREAD_STANDARDS];std.setCurrentText("T2 / M42 x 0.75")
     dia=Q.QDoubleSpinBox();dia.setRange(1,500);dia.setDecimals(3);dia.setValue(42);dia.setSuffix(" mm")
@@ -181,7 +188,7 @@ def _show_dialog():
         if v is not None:shrink.setValue(v)
     std.currentTextChanged.connect(stdchg);fit.currentTextChanged.connect(fitchg);mat.currentTextChanged.connect(matchg);stdchg(std.currentText());fitchg(fit.currentText());matchg(mat.currentText())
     for lab,w in [("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Length:",length),("Wall thickness (female):",wall),("Fit:",fit),("Material / process:",mat),("Shrinkage / compression:",shrink),("Pair diametral clearance:",clear),("Female root relief:",root),("Female crest truncation:",crest),("Thread lead-in chamfer:",lead),("Lead-in length:",lp)]:lay.addRow(lab,w)
-    lay.addRow(Q.QLabel("v0.5.2: final 45 degree lead-in at actual thread entry; default 1 pitch."));btn=Q.QDialogButtonBox(Q.QDialogButtonBox.Ok|Q.QDialogButtonBox.Cancel);btn.accepted.connect(dlg.accept);btn.rejected.connect(dlg.reject);lay.addRow(btn)
+    lay.addRow(Q.QLabel("v0.5.3: nominal pitch is locked; shrinkage compensation does not scale helix pitch."));btn=Q.QDialogButtonBox(Q.QDialogButtonBox.Ok|Q.QDialogButtonBox.Cancel);btn.accepted.connect(dlg.accept);btn.rejected.connect(dlg.reject);lay.addRow(btn)
     if not (dlg.exec() if hasattr(dlg,"exec") else dlg.exec_()):return None
     st,ft,om=str(std.currentText()),str(fit.currentText()),str(out.currentText());kw=dict(standard=st,length=length.value(),wall_thickness=wall.value(),fit=ft,material_process=str(mat.currentText()),shrinkage_percent=shrink.value(),custom_diameter=dia.value() if st=="Custom metric" else None,custom_pitch=pitch.value() if st=="Custom metric" else None,custom_clearance=clear.value() if ft=="Custom" else None,root_relief=root.value() if ft=="Custom" else None,crest_truncation=crest.value() if ft=="Custom" else None,lead_in=lead.isChecked(),lead_in_pitch=lp.value())
     obj=create_internal_thread(**kw) if om=="Internal / female" else create_external_thread(**kw) if om=="External / male" else create_matched_pair(**kw)
