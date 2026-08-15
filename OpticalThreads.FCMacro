@@ -316,11 +316,6 @@ class T2InternalThreadProxy:
         except Exception:
             pass
 
-        if result.isNull():
-            raise RuntimeError("Thread generation produced a null shape")
-        if hasattr(result, "isValid") and not result.isValid():
-            raise RuntimeError("Thread generation produced an invalid shape")
-
         obj.Shape = result
 
         if bool(obj.DebugObjects):
@@ -548,7 +543,6 @@ def _show_dialog():
             root_relief=(root_box.value() if fit == "Custom" else None),
             crest_truncation=(crest_box.value() if fit == "Custom" else None),
         )
-
     return None
 
 
