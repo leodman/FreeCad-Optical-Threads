@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-FreeCAD Optical Threads - v0.3.2
-Parametric native Part Design optical-thread generator.
+FreeCAD Optical Threads - v0.4.0
+Native parametric optical-thread generator.
 
 Design rules:
 - thread standards are data, not geometry code
 - fit correction and material/process compensation are independent layers
+- internal and external parts share one parameter set
 - generated parts remain editable native FreeCAD feature trees
 - use native Part Design / Sketcher features before low-level custom BRep geometry
 
-v0.3.2:
-- preserves the Boolean-safe native v0.3.1 geometry engine unchanged
-- adds the common 1.25-inch astronomy filter/eyepiece thread M28.5 x 0.6
-- conical lead-in remains optional and OFF by default
+v0.4.0:
+- adds native external/male threads with PartDesign::AdditiveHelix
+- adds Output selection: Internal / External / Matched pair
+- preserves the proven v0.3.1 internal geometry and Boolean-safe default
+- matched-pair clearance is applied on the female side only, avoiding double clearance
+- conical female lead-in remains optional and OFF by default
 
 License: MIT
 """
@@ -82,6 +85,12 @@ MATERIAL_PROCESS_PRESETS = {
     "3D PETG": 0.7,
 }
 
+OUTPUT_MODES = (
+    "Internal / female",
+    "External / male",
+    "Matched pair",
+)
+
 
 def _add_info_property(obj, prop_type, name, group, value, readonly=True):
     try:
@@ -94,6 +103,12 @@ def _add_info_property(obj, prop_type, name, group, value, readonly=True):
             obj.setEditorMode(name, 1)
         except Exception:
             pass
+
+
+def _safe_name(text):
+    result = text.replace(" ", "_").replace("/", "").replace(".", "_")
+    result = result.replace("-", "_")
+    return result
 
 
 def _resolve_standard(standard, custom_diameter=None, custom_pitch=None):
@@ -144,7 +159,6 @@ def _resolve_material(material_process, shrinkage_percent=None):
     shrink = MATERIAL_PROCESS_PRESETS[material_process]
     if shrinkage_percent is not None:
         shrink = float(shrinkage_percent)
-
     if shrink < 0.0 or shrink >= 100.0:
         raise ValueError("Shrinkage percentage must be >= 0 and < 100")
 
@@ -152,7 +166,7 @@ def _resolve_material(material_process, shrinkage_percent=None):
     return material_process, shrink, scale
 
 
-def _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness):
+def _validate_common_inputs(thread, length, wall_thickness):
     d0 = float(thread["diameter"])
     p0 = float(thread["pitch"])
     angle = float(thread["profile_angle"])
@@ -164,10 +178,17 @@ def _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness
     if abs(angle - 60.0) > 1.0e-9:
         raise ValueError("This version supports 60 degree metric profiles only")
 
+    return d0, p0, angle, length0, wall0
+
+
+def _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness):
+    d0, p0, angle, length0, wall0 = _validate_common_inputs(
+        thread, length, wall_thickness
+    )
+
     clearance0 = float(fit_values["diametral_clearance"])
     root_relief0 = float(fit_values["root_relief"])
     crest_trunc0 = float(fit_values["crest_truncation"])
-
     if root_relief0 < 0.0 or crest_trunc0 < 0.0:
         raise ValueError("Root relief and crest truncation must be >= 0")
 
@@ -179,6 +200,7 @@ def _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness
     root_relief = root_relief0 * scale
     crest_trunc = crest_trunc0 * scale
 
+    # ISO-style basic internal minor diameter, retaining the proven v0.3.1 model.
     basic_minor_d = d - 1.082531754 * p
     crest_d = basic_minor_d + clearance + 2.0 * crest_trunc
     root_d = d + clearance + 2.0 * root_relief
@@ -189,11 +211,9 @@ def _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness
     thread_depth = r_root - r_crest
 
     if thread_depth <= 0.0:
-        raise ValueError("Invalid thread profile depth")
+        raise ValueError("Invalid internal thread profile depth")
     if r_outer <= r_root + 0.1:
         raise ValueError("Wall thickness is too small for the selected thread")
-
-    half_width = thread_depth * math.tan(math.radians(angle / 2.0))
 
     return {
         "nominal_diameter": d0,
@@ -211,7 +231,47 @@ def _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness
         "r_root": r_root,
         "r_outer": r_outer,
         "thread_depth": thread_depth,
-        "half_width": half_width,
+        "half_width": thread_depth * math.tan(math.radians(angle / 2.0)),
+    }
+
+
+def _compute_external_geometry(thread, fit_values, scale, length, wall_thickness):
+    d0, p0, angle, length0, wall0 = _validate_common_inputs(
+        thread, length, wall_thickness
+    )
+
+    # Matched-pair clearance is intentionally applied on the female side only.
+    # This preserves the already print-tested female dimensions and avoids
+    # accidentally doubling the requested pair clearance.
+    d = d0 * scale
+    p = p0 * scale
+    body_length = length0 * scale
+
+    major_d = d
+    # ISO metric external basic minor/root diameter: d3 = d - 1.226869 P.
+    root_d = d - 1.226869 * p
+    r_major = major_d / 2.0
+    r_root = root_d / 2.0
+    thread_depth = r_major - r_root
+
+    if thread_depth <= 0.0:
+        raise ValueError("Invalid external thread profile depth")
+
+    return {
+        "nominal_diameter": d0,
+        "nominal_pitch": p0,
+        "cad_diameter": d,
+        "cad_pitch": p,
+        "body_length": body_length,
+        "clearance_nominal": float(fit_values["diametral_clearance"]),
+        "root_relief_nominal": 0.0,
+        "crest_trunc_nominal": 0.0,
+        "major_diameter": major_d,
+        "root_diameter": root_d,
+        "r_major": r_major,
+        "r_root": r_root,
+        "thread_depth": thread_depth,
+        "half_width": thread_depth * math.tan(math.radians(angle / 2.0)),
     }
 
 
@@ -219,50 +279,54 @@ def _validate_feature(feature, label):
     if feature.Shape.isNull():
         raise RuntimeError("%s returned a null shape" % label)
     if len(feature.Shape.Solids) != 1:
-        raise RuntimeError("%s must produce one solid; got %d" % (label, len(feature.Shape.Solids)))
+        raise RuntimeError(
+            "%s must produce one solid; got %d" % (label, len(feature.Shape.Solids))
+        )
     if not feature.Shape.isValid():
         raise RuntimeError("%s produced an invalid solid" % label)
 
 
-def _create_native_internal_thread(
-    doc,
-    thread,
-    geom,
-    fit_name,
-    material_process,
-    shrinkage_percent,
-    compensation_scale,
-    right_hand=True,
-    lead_in=False,
+def _add_shared_metadata(
+    body, thread, geom, fit_name, material_process, shrinkage_percent,
+    compensation_scale, kind, generation_method
 ):
-    designation = thread["designation"]
-    safe_name = designation.replace(" ", "_").replace("/", "").replace(".", "_")
-
-    body = doc.addObject("PartDesign::Body", "OpticalThread_%s_Internal" % safe_name)
-    body.Label = "%s Internal Thread v0.3.2" % designation
-
-    _add_info_property(body, "App::PropertyString", "ThreadDesignation", "Thread", designation)
+    _add_info_property(body, "App::PropertyString", "ThreadDesignation", "Thread", thread["designation"])
     _add_info_property(body, "App::PropertyString", "ThreadFamily", "Thread", thread["family"])
     _add_info_property(body, "App::PropertyBool", "VerifiedPreset", "Thread", bool(thread["verified"]))
+    _add_info_property(body, "App::PropertyString", "ThreadKind", "Thread", kind)
     _add_info_property(body, "App::PropertyLength", "NominalDiameter", "Thread", geom["nominal_diameter"])
     _add_info_property(body, "App::PropertyLength", "NominalPitch", "Thread", geom["nominal_pitch"])
     _add_info_property(body, "App::PropertyLength", "CADPitch", "Thread", geom["cad_pitch"])
-    _add_info_property(body, "App::PropertyString", "ThreadKind", "Thread", "Internal / female")
-
     _add_info_property(body, "App::PropertyString", "FitPreset", "Fit", fit_name)
-    _add_info_property(body, "App::PropertyLength", "DiametralClearance", "Fit", geom["clearance_nominal"])
-    _add_info_property(body, "App::PropertyLength", "RootRelief", "Fit", geom["root_relief_nominal"])
-    _add_info_property(body, "App::PropertyLength", "CrestTruncation", "Fit", geom["crest_trunc_nominal"])
-
+    _add_info_property(body, "App::PropertyLength", "PairDiametralClearance", "Fit", geom["clearance_nominal"])
     _add_info_property(body, "App::PropertyString", "MaterialProcess", "Print compensation", material_process)
     _add_info_property(body, "App::PropertyFloat", "ShrinkagePercent", "Print compensation", shrinkage_percent)
     _add_info_property(body, "App::PropertyFloat", "CompensationScale", "Print compensation", compensation_scale)
+    _add_info_property(body, "App::PropertyString", "GenerationMethod", "Information", generation_method)
 
+
+def _create_native_internal_thread(
+    doc, thread, geom, fit_name, material_process, shrinkage_percent,
+    compensation_scale, right_hand=True, lead_in=False
+):
+    designation = thread["designation"]
+    body = doc.addObject(
+        "PartDesign::Body",
+        "OpticalThread_%s_Internal" % _safe_name(designation),
+    )
+    body.Label = "%s Internal Thread v0.4.0" % designation
+
+    _add_shared_metadata(
+        body, thread, geom, fit_name, material_process, shrinkage_percent,
+        compensation_scale, "Internal / female",
+        "Native Part Design primitives + Sketcher triangle + SubtractiveHelix",
+    )
+    _add_info_property(body, "App::PropertyLength", "RootRelief", "Fit", geom["root_relief_nominal"])
+    _add_info_property(body, "App::PropertyLength", "CrestTruncation", "Fit", geom["crest_trunc_nominal"])
     _add_info_property(body, "App::PropertyLength", "EffectiveCrestDiameter", "Information", geom["crest_diameter"])
     _add_info_property(body, "App::PropertyLength", "EffectiveRootDiameter", "Information", geom["root_diameter"])
     _add_info_property(body, "App::PropertyLength", "EffectiveRadialDepth", "Information", geom["thread_depth"])
     _add_info_property(body, "App::PropertyBool", "LeadInEnabled", "Information", bool(lead_in))
-    _add_info_property(body, "App::PropertyString", "GenerationMethod", "Information", "Native Part Design primitives + Sketcher triangle + SubtractiveHelix")
 
     outer = body.newObject("PartDesign::AdditiveCylinder", "SleeveOuter")
     outer.Label = "Sleeve outer cylinder"
@@ -298,9 +362,8 @@ def _create_native_internal_thread(
         _validate_feature(lead_feature, "Native Part Design lead-in")
 
     profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
-    profile.Label = "%s ideal 60 degree thread triangle" % designation
-    xz_plane = body.Origin.OriginFeatures[4]
-    profile.AttachmentSupport = xz_plane
+    profile.Label = "%s ideal 60 degree internal triangle" % designation
+    profile.AttachmentSupport = body.Origin.OriginFeatures[4]
     profile.MapMode = "FlatFace"
 
     p = geom["cad_pitch"]
@@ -308,7 +371,6 @@ def _create_native_internal_thread(
     q1 = App.Vector(geom["r_crest"], z_start - geom["half_width"], 0)
     q2 = App.Vector(geom["r_root"], z_start, 0)
     q3 = App.Vector(geom["r_crest"], z_start + geom["half_width"], 0)
-
     profile.addGeometry([
         Part.LineSegment(q1, q2),
         Part.LineSegment(q2, q3),
@@ -347,48 +409,156 @@ def _create_native_internal_thread(
     return body
 
 
-def create_internal_thread(
-    standard="T2 / M42 x 0.75",
-    length=8.0,
-    wall_thickness=3.0,
-    fit="FDM print",
-    material_process="3D PETG",
-    shrinkage_percent=None,
-    custom_diameter=None,
-    custom_pitch=None,
-    custom_clearance=None,
-    root_relief=None,
-    crest_truncation=None,
-    right_hand=True,
-    lead_in=False,
-    document=None,
+def _create_native_external_thread(
+    doc, thread, geom, fit_name, material_process, shrinkage_percent,
+    compensation_scale, right_hand=True
 ):
-    doc = document or App.ActiveDocument
-    if doc is None:
-        doc = App.newDocument("OpticalThreads")
+    designation = thread["designation"]
+    body = doc.addObject(
+        "PartDesign::Body",
+        "OpticalThread_%s_External" % _safe_name(designation),
+    )
+    body.Label = "%s External Thread v0.4.0" % designation
 
+    _add_shared_metadata(
+        body, thread, geom, fit_name, material_process, shrinkage_percent,
+        compensation_scale, "External / male",
+        "Native Part Design AdditiveCylinder + Sketcher triangle + AdditiveHelix",
+    )
+    _add_info_property(body, "App::PropertyString", "ClearanceApplication", "Fit", "Pair clearance is applied to female geometry")
+    _add_info_property(body, "App::PropertyLength", "EffectiveMajorDiameter", "Information", geom["major_diameter"])
+    _add_info_property(body, "App::PropertyLength", "EffectiveRootDiameter", "Information", geom["root_diameter"])
+    _add_info_property(body, "App::PropertyLength", "EffectiveRadialDepth", "Information", geom["thread_depth"])
+
+    shaft = body.newObject("PartDesign::AdditiveCylinder", "ThreadCore")
+    shaft.Label = "Male thread root/core cylinder"
+    shaft.Radius = geom["r_root"]
+    shaft.Height = geom["body_length"]
+    shaft.Angle = 360
+    doc.recompute()
+    _validate_feature(shaft, "Native Part Design male core")
+
+    profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
+    profile.Label = "%s ideal 60 degree external triangle" % designation
+    profile.AttachmentSupport = body.Origin.OriginFeatures[4]
+    profile.MapMode = "FlatFace"
+
+    p = geom["cad_pitch"]
+    z_start = -p
+    # Base of the triangle lies on/slightly inside the root cylinder so the
+    # additive helix has a robust volumetric intersection with the shaft.
+    overlap = max(0.01 * compensation_scale, 0.015)
+    r_base = geom["r_root"] - overlap
+    q1 = App.Vector(r_base, z_start - geom["half_width"], 0)
+    q2 = App.Vector(geom["r_major"], z_start, 0)
+    q3 = App.Vector(r_base, z_start + geom["half_width"], 0)
+    profile.addGeometry([
+        Part.LineSegment(q1, q2),
+        Part.LineSegment(q2, q3),
+        Part.LineSegment(q3, q1),
+    ], False)
+    doc.recompute()
+
+    helix = body.newObject("PartDesign::AdditiveHelix", "ThreadHelix")
+    helix.Label = "%s additive helix" % designation
+    helix.Profile = profile
+    helix.ReferenceAxis = (profile, ["V_Axis"])
+    helix.Mode = 0
+    helix.Pitch = p
+    helix.Height = geom["body_length"] + 2.0 * p
+    helix.Turns = helix.Height.Value / p
+    helix.Angle = 0
+    helix.Growth = 0
+    helix.LeftHanded = not bool(right_hand)
+    helix.Reversed = 0
+    doc.recompute()
+    _validate_feature(helix, "Native AdditiveHelix")
+
+    try:
+        shaft.ViewObject.Visibility = False
+        profile.ViewObject.Visibility = False
+        helix.ViewObject.Deviation = 0.05
+        helix.ViewObject.AngularDeflection = 10.0
+    except Exception:
+        pass
+
+    body.Tip = helix
+    doc.recompute()
+    return body
+
+
+def _resolve_all(
+    standard, length, wall_thickness, fit, material_process,
+    shrinkage_percent, custom_diameter, custom_pitch,
+    custom_clearance, root_relief, crest_truncation
+):
     thread = _resolve_standard(standard, custom_diameter, custom_pitch)
-    fit_name, fit_values = _resolve_fit(fit, custom_clearance, root_relief, crest_truncation)
-    material_process, shrink, scale = _resolve_material(material_process, shrinkage_percent)
-    geom = _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness)
+    fit_name, fit_values = _resolve_fit(
+        fit, custom_clearance, root_relief, crest_truncation
+    )
+    material_process, shrink, scale = _resolve_material(
+        material_process, shrinkage_percent
+    )
+    return thread, fit_name, fit_values, material_process, shrink, scale
 
-    body = _create_native_internal_thread(
-        doc,
-        thread,
-        geom,
-        fit_name,
-        material_process,
-        shrink,
-        scale,
-        right_hand=right_hand,
-        lead_in=lead_in,
+
+def create_internal_thread(
+    standard="T2 / M42 x 0.75", length=8.0, wall_thickness=3.0,
+    fit="FDM print", material_process="3D PETG", shrinkage_percent=None,
+    custom_diameter=None, custom_pitch=None, custom_clearance=None,
+    root_relief=None, crest_truncation=None, right_hand=True,
+    lead_in=False, document=None
+):
+    doc = document or App.ActiveDocument or App.newDocument("OpticalThreads")
+    thread, fit_name, fit_values, material_process, shrink, scale = _resolve_all(
+        standard, length, wall_thickness, fit, material_process,
+        shrinkage_percent, custom_diameter, custom_pitch,
+        custom_clearance, root_relief, crest_truncation
+    )
+    geom = _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness)
+    return _create_native_internal_thread(
+        doc, thread, geom, fit_name, material_process, shrink, scale,
+        right_hand=right_hand, lead_in=lead_in
     )
 
-    if Gui:
-        Gui.activeDocument().activeView().viewAxonometric()
-        Gui.activeDocument().activeView().fitAll()
 
-    return body
+def create_external_thread(
+    standard="T2 / M42 x 0.75", length=8.0, wall_thickness=3.0,
+    fit="FDM print", material_process="3D PETG", shrinkage_percent=None,
+    custom_diameter=None, custom_pitch=None, custom_clearance=None,
+    root_relief=None, crest_truncation=None, right_hand=True,
+    document=None
+):
+    doc = document or App.ActiveDocument or App.newDocument("OpticalThreads")
+    thread, fit_name, fit_values, material_process, shrink, scale = _resolve_all(
+        standard, length, wall_thickness, fit, material_process,
+        shrinkage_percent, custom_diameter, custom_pitch,
+        custom_clearance, root_relief, crest_truncation
+    )
+    geom = _compute_external_geometry(thread, fit_values, scale, length, wall_thickness)
+    return _create_native_external_thread(
+        doc, thread, geom, fit_name, material_process, shrink, scale,
+        right_hand=right_hand
+    )
+
+
+def create_matched_pair(**kwargs):
+    doc = kwargs.pop("document", None) or App.ActiveDocument or App.newDocument("OpticalThreads")
+    internal = create_internal_thread(document=doc, **kwargs)
+    external = create_external_thread(document=doc, **kwargs)
+
+    # Move the male aside for convenient inspection; this does not alter its geometry.
+    try:
+        spacing = max(
+            float(internal.Shape.BoundBox.XLength),
+            float(external.Shape.BoundBox.XLength),
+        ) + 5.0
+        external.Placement.Base.x += spacing
+    except Exception:
+        pass
+
+    doc.recompute()
+    return internal, external
 
 
 def create_t2_internal(**kwargs):
@@ -396,14 +566,24 @@ def create_t2_internal(**kwargs):
     return create_internal_thread(**kwargs)
 
 
+def create_t2_external(**kwargs):
+    kwargs["standard"] = "T2 / M42 x 0.75"
+    return create_external_thread(**kwargs)
+
+
 def create_1_25_filter_internal(**kwargs):
     kwargs["standard"] = "1.25in Filter / M28.5 x 0.6"
     return create_internal_thread(**kwargs)
 
 
+def create_1_25_filter_external(**kwargs):
+    kwargs["standard"] = "1.25in Filter / M28.5 x 0.6"
+    return create_external_thread(**kwargs)
+
+
 def _show_dialog():
     if Gui is None:
-        return create_internal_thread()
+        return create_matched_pair()
 
     try:
         from PySide import QtGui
@@ -412,8 +592,13 @@ def _show_dialog():
         from PySide2 import QtWidgets
 
     dlg = QtWidgets.QDialog()
-    dlg.setWindowTitle("FreeCAD Optical Threads v0.3.2")
+    dlg.setWindowTitle("FreeCAD Optical Threads v0.4.0")
     layout = QtWidgets.QFormLayout(dlg)
+
+    output_box = QtWidgets.QComboBox()
+    for name in OUTPUT_MODES:
+        output_box.addItem(name)
+    output_box.setCurrentText("Matched pair")
 
     standard_box = QtWidgets.QComboBox()
     for name in THREAD_STANDARDS:
@@ -487,10 +672,10 @@ def _show_dialog():
 
     def standard_changed(name):
         name = str(name)
-        is_custom = name == "Custom metric"
-        diameter_box.setEnabled(is_custom)
-        pitch_box.setEnabled(is_custom)
-        if not is_custom:
+        custom = name == "Custom metric"
+        diameter_box.setEnabled(custom)
+        pitch_box.setEnabled(custom)
+        if not custom:
             data = THREAD_STANDARDS[name]
             diameter_box.setValue(data["diameter"])
             pitch_box.setValue(data["pitch"])
@@ -519,22 +704,23 @@ def _show_dialog():
     fit_changed("FDM print")
     material_changed("3D PETG")
 
+    layout.addRow("Output:", output_box)
     layout.addRow("Thread standard:", standard_box)
     layout.addRow("Diameter:", diameter_box)
     layout.addRow("Pitch:", pitch_box)
     layout.addRow("Length:", length_box)
-    layout.addRow("Wall thickness:", wall_box)
+    layout.addRow("Wall thickness (female):", wall_box)
     layout.addRow("Fit:", fit_box)
     layout.addRow("Material / process:", material_box)
     layout.addRow("Shrinkage / compression:", shrinkage_box)
-    layout.addRow("Diametral clearance:", clearance_box)
-    layout.addRow("Root relief:", root_box)
-    layout.addRow("Crest truncation:", crest_box)
-    layout.addRow("Experimental conical lead-in:", lead_box)
+    layout.addRow("Pair diametral clearance:", clearance_box)
+    layout.addRow("Female root relief:", root_box)
+    layout.addRow("Female crest truncation:", crest_box)
+    layout.addRow("Experimental female lead-in:", lead_box)
 
     note = QtWidgets.QLabel(
-        "v0.3.2: native Part Design thread engine.\n"
-        "Presets: T2 M42x0.75 and 1.25in filter M28.5x0.6. Lead-in OFF by default."
+        "v0.4.0: Internal = native SubtractiveHelix; External = native AdditiveHelix.\n"
+        "Matched pair uses one standard/fit/material set. Pair clearance is applied to the female side."
     )
     layout.addRow(note)
 
@@ -545,24 +731,42 @@ def _show_dialog():
     buttons.rejected.connect(dlg.reject)
     layout.addRow(buttons)
 
-    if dlg.exec_():
-        standard = str(standard_box.currentText())
-        fit = str(fit_box.currentText())
-        return create_internal_thread(
-            standard=standard,
-            length=length_box.value(),
-            wall_thickness=wall_box.value(),
-            fit=fit,
-            material_process=str(material_box.currentText()),
-            shrinkage_percent=shrinkage_box.value(),
-            custom_diameter=(diameter_box.value() if standard == "Custom metric" else None),
-            custom_pitch=(pitch_box.value() if standard == "Custom metric" else None),
-            custom_clearance=(clearance_box.value() if fit == "Custom" else None),
-            root_relief=(root_box.value() if fit == "Custom" else None),
-            crest_truncation=(crest_box.value() if fit == "Custom" else None),
-            lead_in=bool(lead_box.isChecked()),
+    if not dlg.exec_():
+        return None
+
+    standard = str(standard_box.currentText())
+    fit = str(fit_box.currentText())
+    output = str(output_box.currentText())
+
+    kwargs = dict(
+        standard=standard,
+        length=length_box.value(),
+        wall_thickness=wall_box.value(),
+        fit=fit,
+        material_process=str(material_box.currentText()),
+        shrinkage_percent=shrinkage_box.value(),
+        custom_diameter=(diameter_box.value() if standard == "Custom metric" else None),
+        custom_pitch=(pitch_box.value() if standard == "Custom metric" else None),
+        custom_clearance=(clearance_box.value() if fit == "Custom" else None),
+        root_relief=(root_box.value() if fit == "Custom" else None),
+        crest_truncation=(crest_box.value() if fit == "Custom" else None),
+    )
+
+    if output == "Internal / female":
+        result = create_internal_thread(
+            lead_in=bool(lead_box.isChecked()), **kwargs
         )
-    return None
+    elif output == "External / male":
+        result = create_external_thread(**kwargs)
+    else:
+        result = create_matched_pair(
+            lead_in=bool(lead_box.isChecked()), **kwargs
+        )
+
+    if Gui:
+        Gui.activeDocument().activeView().viewAxonometric()
+        Gui.activeDocument().activeView().fitAll()
+    return result
 
 
 _show_dialog()
