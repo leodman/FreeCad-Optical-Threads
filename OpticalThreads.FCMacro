@@ -1,25 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-FreeCAD Optical Threads - v0.1.7
+FreeCAD Optical Threads - v0.1.8
 T2 / M42 x 0.75 internal threaded sleeve generator.
 
-Print-test corrections:
-- preserve intended final thread pitch/helix
-- do not obtain fit by making the whole thread shallower
-- deepen the female root/valley independently
-- truncate the female crest/summit independently
-- keep diametral fit clearance as a separate parameter
-- compensate material/process shrinkage with a user-editable percentage
-
-Boolean-safety correction in v0.1.7:
-- KEEP the known-working v0.1.5 helix, sweep, profile and intersection geometry
-- repair only the final boolean result after the thread cut succeeds
-- rebuild SameParameter / p-curve consistency on the final BRep
-- heal tolerances, refine, then repair once more
-
-The selected material/process supplies a nominal shrinkage value. For
-"3D PETG" the nominal default is 0.7%, but the user can change the percentage
-for a particular printer/material/process without changing the thread fit.
+v0.1.8 boolean-safety redesign:
+- removes makePipeShell() from thread generation
+- builds the helical cutter from compatible radial profile sections
+- lofts those sections with Part.makeLoft(), using OCCT ThruSections
+- preserves the v0.1.5 dimensions, fit model, PETG compensation and seam workaround
+- validates the cutter and final result before exposing the solid
 
 License: MIT
 """
@@ -61,70 +50,105 @@ CREST_TRUNC_PRESETS = {
     "Custom": None,
 }
 
-# Nominal expected linear shrinkage percentages after printing/cooling.
-# Selecting a material/process loads this value into ShrinkagePercent.
-# ShrinkagePercent itself remains editable by the user.
 MATERIAL_PROCESS_PRESETS = {
     "No compensation": 0.0,
     "3D PETG": 0.7,
 }
 
+# Smooth loft accuracy. For the default ~12.6-turn cutter this produces
+# roughly 200 compatible cross-sections: detailed enough for M42x0.75 while
+# remaining much lighter than a mesh-like construction.
+LOFT_SECTIONS_PER_TURN = 16
 
-def _repair_final_brep(shape):
-    """Repair the already-successful thread boolean without changing its geometry."""
-    if shape is None or shape.isNull():
-        raise RuntimeError("Cannot repair a null thread shape")
 
-    repaired = shape.copy()
+def _thread_section(theta, z_center, r_inner, r_outer, root_half, crest_half):
+    """Create one closed four-edge radial thread-tool section."""
+    c = math.cos(theta)
+    s = math.sin(theta)
 
-    # InvalidCurveOnSurface is commonly caused by a mismatch between an
-    # edge's 3D curve and its 2D p-curve on the supporting face. SameParameter
-    # asks OCCT to restore that consistency while preserving the shape.
-    try:
-        Part.ShapeFix.sameParameter(repaired, True, 1.0e-7)
-    except Exception:
-        pass
+    def point(radius, z):
+        return App.Vector(radius * c, radius * s, z)
 
-    # Heal small BRep tolerance/topology inconsistencies only. The upper
-    # tolerance is intentionally tiny relative to an M42x0.75 thread.
-    try:
-        repaired.fix(1.0e-7, 1.0e-7, 1.0e-4)
-    except TypeError:
-        try:
-            repaired.fix()
-        except Exception:
-            pass
-    except Exception:
-        pass
+    q1 = point(r_inner, z_center - root_half)
+    q2 = point(r_outer, z_center - crest_half)
+    q3 = point(r_outer, z_center + crest_half)
+    q4 = point(r_inner, z_center + root_half)
 
-    try:
-        refined = repaired.removeSplitter()
-        if refined is not None and not refined.isNull():
-            repaired = refined
-    except Exception:
-        pass
+    return Part.Wire([
+        Part.makeLine(q1, q2),
+        Part.makeLine(q2, q3),
+        Part.makeLine(q3, q4),
+        Part.makeLine(q4, q1),
+    ])
 
-    # Refinement may recreate edge/face parameterization, so repair again.
-    try:
-        Part.ShapeFix.sameParameter(repaired, True, 1.0e-7)
-    except Exception:
-        pass
 
-    try:
-        repaired.fix(1.0e-7, 1.0e-7, 1.0e-4)
-    except Exception:
-        pass
+def _make_lofted_thread_cutter(
+    pitch,
+    height,
+    z0,
+    r_inner,
+    r_outer,
+    root_half,
+    crest_half,
+    right_hand=True,
+):
+    """Build the thread cutter without PipeShell/p-curve sweep geometry."""
+    turns = height / pitch
+    steps = max(8, int(math.ceil(turns * LOFT_SECTIONS_PER_TURN)))
+    handed = 1.0 if right_hand else -1.0
 
-    if repaired.isNull():
-        raise RuntimeError("Final BRep repair returned a null shape")
-    if len(repaired.Solids) != 1:
-        raise RuntimeError(
-            "Final thread must contain exactly one solid; got %d" % len(repaired.Solids)
+    sections = []
+    for i in range(steps + 1):
+        f = float(i) / float(steps)
+        z = z0 + height * f
+        theta = handed * 2.0 * math.pi * turns * f
+        sections.append(
+            _thread_section(
+                theta,
+                z,
+                r_inner,
+                r_outer,
+                root_half,
+                crest_half,
+            )
         )
-    if hasattr(repaired, "isValid") and not repaired.isValid():
-        raise RuntimeError("Final BRep remains invalid after repair")
 
-    return repaired
+    # FreeCAD's Part.makeLoft maps to OCCT BRepOffsetAPI_ThruSections and
+    # performs compatibility matching between the section wires. This avoids
+    # the PipeShell edge/p-curve failure that BOPCheck reported on v0.1.5.
+    cutter = Part.makeLoft(sections, True, False, False, 3)
+
+    if cutter is None or cutter.isNull():
+        raise RuntimeError("Lofted thread cutter is null")
+    if len(cutter.Solids) != 1:
+        raise RuntimeError(
+            "Lofted thread cutter must contain one solid; got %d" % len(cutter.Solids)
+        )
+    if hasattr(cutter, "isValid") and not cutter.isValid():
+        raise RuntimeError("Lofted thread cutter is invalid before boolean cut")
+
+    return cutter, sections[0], sections[-1]
+
+
+def _validate_final_shape(shape):
+    if shape is None or shape.isNull():
+        raise RuntimeError("Thread boolean returned a null shape")
+
+    try:
+        refined = shape.removeSplitter()
+        if refined is not None and not refined.isNull():
+            shape = refined
+    except Exception:
+        pass
+
+    if len(shape.Solids) != 1:
+        raise RuntimeError(
+            "Final thread must contain exactly one solid; got %d" % len(shape.Solids)
+        )
+    if hasattr(shape, "isValid") and not shape.isValid():
+        raise RuntimeError("Final threaded sleeve is an invalid shape")
+
+    return shape
 
 
 class T2InternalThreadProxy:
@@ -135,12 +159,16 @@ class T2InternalThreadProxy:
 
         obj.addProperty("App::PropertyString", "ThreadDesignation", "Thread")
         obj.ThreadDesignation = "T2 / M42 x 0.75 internal"
+
         obj.addProperty("App::PropertyLength", "NominalDiameter", "Thread")
         obj.NominalDiameter = 42.0
+
         obj.addProperty("App::PropertyLength", "Pitch", "Thread")
         obj.Pitch = 0.75
+
         obj.addProperty("App::PropertyLength", "Length", "Geometry")
         obj.Length = 8.0
+
         obj.addProperty("App::PropertyLength", "WallThickness", "Geometry")
         obj.WallThickness = 3.0
 
@@ -198,8 +226,10 @@ class T2InternalThreadProxy:
 
         obj.addProperty("App::PropertyBool", "RightHand", "Thread")
         obj.RightHand = True
+
         obj.addProperty("App::PropertyAngle", "SeamOffset", "Advanced")
         obj.SeamOffset = 30.0
+
         obj.addProperty("App::PropertyBool", "DebugObjects", "Advanced")
         obj.DebugObjects = False
 
@@ -207,16 +237,16 @@ class T2InternalThreadProxy:
         obj.addProperty("App::PropertyLength", "EffectiveRootDiameter", "Information")
         obj.addProperty("App::PropertyLength", "EffectiveRadialDepth", "Information")
         obj.addProperty("App::PropertyLength", "CADPitch", "Information")
+        obj.addProperty("App::PropertyString", "GenerationMethod", "Information")
+        obj.GenerationMethod = "Lofted compatible sections (no PipeShell)"
         obj.addProperty("App::PropertyString", "ProfileNote", "Information")
         obj.ProfileNote = (
-            "v0.1.7: M42x0.75, 60 degree internal profile. "
-            "Geometry generation is unchanged from working v0.1.5. "
-            "After the successful thread cut, the final BRep is repaired for "
-            "SameParameter/p-curve consistency and later boolean operations."
+            "v0.1.8: M42x0.75, 60 degree internal profile. "
+            "Clearance, root relief, crest truncation and PETG compensation are "
+            "preserved. The thread cutter is generated by OCCT ThruSections/loft "
+            "instead of makePipeShell to avoid invalid curve-on-surface BReps."
         )
 
-        # Nominal thread definition and calculated results are read-only.
-        # ShrinkagePercent intentionally remains editable.
         for name in (
             "ThreadDesignation",
             "NominalDiameter",
@@ -226,6 +256,7 @@ class T2InternalThreadProxy:
             "EffectiveRootDiameter",
             "EffectiveRadialDepth",
             "CADPitch",
+            "GenerationMethod",
             "ProfileNote",
         ):
             obj.setEditorMode(name, 1)
@@ -267,16 +298,9 @@ class T2InternalThreadProxy:
         if shrinkage_percent < 0.0 or shrinkage_percent >= 100.0:
             raise ValueError("ShrinkagePercent must be >= 0 and < 100")
 
-        shrinkage = shrinkage_percent / 100.0
-
-        # Exact inverse compensation. For 0.7% shrinkage:
-        # scale = 1 / 0.993 = 1.007049345...
-        scale = 1.0 / (1.0 - shrinkage)
+        scale = 1.0 / (1.0 - shrinkage_percent / 100.0)
         obj.CompensationScale = scale
 
-        # Apply the same linear compensation to ALL generated dimensions,
-        # including pitch. After the assumed shrinkage, the intended nominal
-        # M42 x 0.75 dimensions and fit corrections are recovered.
         d = d_nominal * scale
         p = p_nominal * scale
         length = length_nominal * scale
@@ -284,13 +308,9 @@ class T2InternalThreadProxy:
         clearance_d = clearance_nominal * scale
         root_relief = root_relief_nominal * scale
         crest_trunc = crest_trunc_nominal * scale
-
         obj.CADPitch = p
 
-        # ISO metric basic internal-thread minor diameter, evaluated on the
-        # compensated CAD dimensions.
         basic_minor_d = d - 1.082531754 * p
-
         crest_d = basic_minor_d + clearance_d + 2.0 * crest_trunc
         root_d = d + clearance_d + 2.0 * root_relief
 
@@ -308,25 +328,23 @@ class T2InternalThreadProxy:
         obj.EffectiveRootDiameter = root_d
         obj.EffectiveRadialDepth = depth
 
-        # ------------------------------------------------------------------
-        # IMPORTANT: everything from here through sleeve.cut(cutter) is the
-        # known-working v0.1.5 construction. Do not change it as part of BRep
-        # repair work; v0.1.6 showed that changing helix construction can move
-        # the swept tool enough that it no longer intersects the sleeve.
-        # ------------------------------------------------------------------
+        # Base sleeve: same geometry and seam workaround used by v0.1.5.
         eps = max(0.03, 0.04 * p)
         outer = Part.makeCylinder(r_outer, length)
         bore = Part.makeCylinder(
-            r_crest, length + 2.0 * eps, App.Vector(0, 0, -eps)
+            r_crest,
+            length + 2.0 * eps,
+            App.Vector(0, 0, -eps),
         )
         sleeve = outer.cut(bore)
-
         sleeve.rotate(
-            App.Vector(0, 0, 0), App.Vector(0, 0, 1), seam_offset
+            App.Vector(0, 0, 0),
+            App.Vector(0, 0, 1),
+            seam_offset,
         )
 
         z0 = -p
-        helix_height = length + 2.0 * p
+        cutter_height = length + 2.0 * p
 
         radial_overlap = max(0.10 * scale, 0.25 * depth)
         x_inner = r_crest - radial_overlap
@@ -336,62 +354,37 @@ class T2InternalThreadProxy:
         root_half = min(0.36 * p, ideal_half_width + 0.08 * p)
         crest_half = 0.05 * p
 
-        q1 = App.Vector(x_inner, 0, z0 - root_half)
-        q2 = App.Vector(x_outer, 0, z0 - crest_half)
-        q3 = App.Vector(x_outer, 0, z0 + crest_half)
-        q4 = App.Vector(x_inner, 0, z0 + root_half)
-
-        profile = Part.Wire([
-            Part.makeLine(q1, q2),
-            Part.makeLine(q2, q3),
-            Part.makeLine(q3, q4),
-            Part.makeLine(q4, q1),
-        ])
-
-        r_spine = x_inner + 0.45 * (x_outer - x_inner)
-        try:
-            helix = Part.makeLongHelix(
-                p, helix_height, r_spine, 0, not bool(obj.RightHand)
-            )
-        except Exception:
-            helix = Part.makeHelix(
-                p, helix_height, r_spine, 0, not bool(obj.RightHand)
-            )
-        helix.translate(App.Vector(0, 0, z0))
-
-        spine = Part.Wire(helix.Edges)
-        cutter = spine.makePipeShell([profile], True, True)
-
-        if cutter.isNull() or len(cutter.Solids) == 0:
-            raise RuntimeError("Helical sweep did not create a solid cutter")
+        cutter, first_section, last_section = _make_lofted_thread_cutter(
+            p,
+            cutter_height,
+            z0,
+            x_inner,
+            x_outer,
+            root_half,
+            crest_half,
+            bool(obj.RightHand),
+        )
 
         common = sleeve.common(cutter)
         if common.isNull() or common.Volume <= 1.0e-5:
             raise RuntimeError(
-                "Thread cutter does not intersect sleeve. "
-                "Set DebugObjects=true and report the FreeCAD version."
+                "Lofted thread cutter does not intersect sleeve. "
+                "Enable DebugObjects and report the FreeCAD version."
             )
 
         result = sleeve.cut(cutter)
-        if result.isNull():
-            raise RuntimeError("Thread boolean cut returned a null shape")
-        if hasattr(result, "isValid") and not result.isValid():
-            raise RuntimeError("Thread boolean cut produced an invalid shape")
-
-        # v0.1.7: only now, after the known-working cut succeeded, repair the
-        # final BRep. No change is made to helix/sweep placement or dimensions.
-        result = _repair_final_brep(result)
-
+        result = _validate_final_shape(result)
         obj.Shape = result
 
         if bool(obj.DebugObjects):
             doc = obj.Document
-            for name, shape in (
-                ("DEBUG_ThreadProfile", profile),
-                ("DEBUG_ThreadHelix", helix),
+            debug_shapes = (
+                ("DEBUG_ThreadFirstSection", first_section),
+                ("DEBUG_ThreadLastSection", last_section),
                 ("DEBUG_ThreadCutter", cutter),
                 ("DEBUG_ThreadIntersection", common),
-            ):
+            )
+            for name, shape in debug_shapes:
                 old = doc.getObject(name)
                 if old:
                     doc.removeObject(name)
@@ -453,7 +446,7 @@ def create_t2_internal(
         doc = App.newDocument("OpticalThreads")
 
     obj = doc.addObject("PartDesign::FeaturePython", "T2_M42x0_75_Internal")
-    obj.Label = "T2 M42x0.75 Internal Thread v0.1.7"
+    obj.Label = "T2 M42x0.75 Internal Thread v0.1.8"
     T2InternalThreadProxy(obj)
     if Gui:
         T2InternalViewProvider(obj.ViewObject)
@@ -467,7 +460,6 @@ def create_t2_internal(
         else "No compensation"
     )
 
-    # Material/process sets the nominal default; caller may override it.
     obj.ShrinkagePercent = MATERIAL_PROCESS_PRESETS[str(obj.MaterialProcess)]
     if shrinkage_percent is not None:
         obj.ShrinkagePercent = float(shrinkage_percent)
@@ -498,7 +490,7 @@ def _show_dialog():
         from PySide2 import QtWidgets
 
     dlg = QtWidgets.QDialog()
-    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.1.7")
+    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.1.8")
     layout = QtWidgets.QFormLayout(dlg)
 
     length_box = QtWidgets.QDoubleSpinBox()
@@ -585,8 +577,8 @@ def _show_dialog():
 
     note = QtWidgets.QLabel(
         "3D PETG defaults to 0.7% shrinkage, but the percentage is editable.\n"
-        "Compensation uses the exact inverse: scale = 1/(1 - shrinkage).\n"
-        "v0.1.7 preserves the working thread construction and repairs the final BRep."
+        "v0.1.8 replaces PipeShell with a lofted-section thread cutter\n"
+        "so the generated solid can participate in later CAD booleans."
     )
     layout.addRow(note)
 
