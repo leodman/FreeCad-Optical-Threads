@@ -14,6 +14,7 @@ The current development generator creates:
 - Independent diametral clearance
 - Independent root/valley relief
 - Independent crest/summit truncation
+- **Material/process shrinkage compensation**
 - Recomputes when parameters change
 
 The output is a normal FreeCAD solid that can be fused, cut, linked, cloned, or used as a building block in a larger model.
@@ -40,9 +41,8 @@ Physical print testing showed that simply adding clearance was not enough. The p
 
 The correction in v0.1.3 is therefore geometric:
 
-- **Pitch remains 0.75 mm.**
-- **Helix geometry remains unchanged.**
-- Fit clearance no longer substitutes for thread depth.
+- **Pitch remains nominally 0.75 mm.**
+- Fit clearance does not substitute for thread depth.
 - `RootRelief` cuts the female valley/root farther outward radially.
 - `CrestTruncation` removes material from the female summit/crest independently.
 - `DiametralClearance` remains an independent mating-fit parameter.
@@ -59,7 +59,7 @@ For M42 × 0.75, the macro uses the ISO-style basic internal minor diameter:
 
 `D1 = D - 1.082531754 × P`
 
-With the FDM preset, the resulting geometry is approximately:
+Without material compensation, the FDM preset gives approximately:
 
 - Basic internal minor diameter: **41.1881 mm**
 - Effective female crest diameter: **41.4881 mm**
@@ -67,6 +67,38 @@ With the FDM preset, the resulting geometry is approximately:
 - Effective radial groove depth: **0.4560 mm**
 
 The important design rule is that **print clearance and thread depth are separate controls**. The generator may truncate the thread summit for printability, but it should still carve the valley fully enough to avoid the shallow-thread failure seen in the first printed test.
+
+## v0.1.4 material/process compensation
+
+A later PETG print measured about **41.20 mm** at the female inner/crest diameter, versus about **41.49 mm** in the uncompensated CAD geometry. That is roughly 0.7% at this size, so v0.1.4 adds a single **Material / process** selection.
+
+Current choices:
+
+| Material / process | Assumed linear shrinkage |
+|---|---:|
+| No compensation | 0.0% |
+| 3D PETG - 0.7% shrinkage | 0.7% |
+
+The PETG preset does **not** merely add 0.7% to one diameter. It applies the exact inverse linear compensation:
+
+`scale = 1 / (1 - 0.007) = 1.007049345...`
+
+This scale is applied consistently to all generated linear CAD dimensions:
+
+- nominal diameter
+- pitch
+- thread/sleeve length
+- wall thickness
+- diametral clearance
+- root relief
+- crest truncation
+- small geometric robustness allowances used by the swept cutter
+
+The intention is that, after an assumed 0.7% linear shrinkage, the cooled part returns to the requested nominal geometry. Thus the CAD pitch for the PETG preset is about **0.75529 mm**, which should shrink back toward **0.750 mm**.
+
+For the M42 × 0.75 FDM preset with PETG 0.7% compensation, the CAD female crest diameter is approximately **41.780 mm**; after 0.7% ideal linear shrinkage it returns to approximately **41.488 mm**.
+
+This is an empirical printing compensation, not a universal PETG material constant. Actual dimensional behavior depends on filament formulation, printer, nozzle, extrusion calibration, temperature, cooling, print orientation, and slicer settings.
 
 ## Fit presets
 
@@ -87,7 +119,7 @@ Printer, resin, filament, machining process, material, and the mating commercial
 
 - Designation: **M42 × 0.75**
 - Nominal diameter: **42.0 mm**
-- Pitch: **0.75 mm**
+- Nominal pitch: **0.75 mm**
 - Thread angle: **60°**
 - Default hand: right-hand
 
@@ -100,6 +132,7 @@ Printer, resin, filament, machining process, material, and the mating commercial
   - M28.5 × 0.6 (1.25-inch filters)
   - C-mount 1"-32 UN
   - SM1 / 1.035"-40
+- More material/process compensation presets as they are physically calibrated
 - Entry chamfer/runout controls
 - Convert the macro into a proper **Optical Threads Workbench**
 - Thread library stored as data rather than hard-coded UI entries
