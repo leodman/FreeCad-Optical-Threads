@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-FreeCAD Optical Threads - v0.1.9
+FreeCAD Optical Threads - v0.1.10
 T2 / M42 x 0.75 internal threaded sleeve generator.
 
-v0.1.9 boolean-safety redesign:
+v0.1.10 boolean-safety redesign:
 - no makePipeShell() thread sweep
-- builds short lofts, at most about one revolution each
-- neighboring turn solids overlap slightly and are fused
-- preserves M42x0.75 geometry, fit corrections and PETG compensation
-- preserves the cylinder-seam workaround from the working v0.1.5 geometry
+- builds short lofted helical cutter segments
+- DOES NOT fuse the cutter segments together
+- subtracts each valid intersecting segment from the sleeve sequentially
+- validates the threaded sleeve after every cut
+- preserves M42x0.75 geometry, FDM fit controls and PETG compensation
 
 License: MIT
 """
@@ -56,11 +57,10 @@ MATERIAL_PROCESS_PRESETS = {
 }
 
 SECTIONS_PER_TURN = 24
-TURN_OVERLAP_FRACTION = 0.025
+SEGMENT_OVERLAP_FRACTION = 0.025
 
 
 def _section_wire(theta, z_center, r_inner, r_outer, root_half, crest_half):
-    """Closed four-edge radial section of the thread cutting tool."""
     c = math.cos(theta)
     s = math.sin(theta)
 
@@ -90,10 +90,9 @@ def _make_short_loft(
     crest_half,
     right_hand,
 ):
-    """Make one short helical loft using the global pitch/phase relation."""
     span = z_end - z_start
     if span <= 0:
-        raise RuntimeError("Invalid loft span")
+        raise RuntimeError("Invalid thread loft span")
 
     turns = span / pitch
     steps = max(6, int(math.ceil(turns * SECTIONS_PER_TURN)))
@@ -103,8 +102,6 @@ def _make_short_loft(
     for i in range(steps + 1):
         f = float(i) / float(steps)
         z = z_start + span * f
-        # Phase is derived from absolute axial position. This is important:
-        # adjacent short lofts then describe the same continuous helix.
         theta = handed * 2.0 * math.pi * ((z - global_z0) / pitch)
         sections.append(
             _section_wire(theta, z, r_inner, r_outer, root_half, crest_half)
@@ -112,18 +109,18 @@ def _make_short_loft(
 
     loft = Part.makeLoft(sections, True, False, False, 3)
     if loft is None or loft.isNull():
-        raise RuntimeError("A one-turn thread loft returned a null shape")
+        raise RuntimeError("A thread loft segment returned a null shape")
     if len(loft.Solids) != 1:
         raise RuntimeError(
-            "A one-turn thread loft must contain one solid; got %d" % len(loft.Solids)
+            "A thread loft segment must contain one solid; got %d" % len(loft.Solids)
         )
     if hasattr(loft, "isValid") and not loft.isValid():
-        raise RuntimeError("A one-turn thread loft is invalid")
+        raise RuntimeError("A thread loft segment is invalid")
 
-    return loft, sections[0], sections[-1]
+    return loft
 
 
-def _make_thread_cutter(
+def _make_thread_segments(
     pitch,
     height,
     z0,
@@ -133,12 +130,10 @@ def _make_thread_cutter(
     crest_half,
     right_hand,
 ):
-    """Build the full cutter from overlapping one-turn loft solids."""
+    """Return independent, slightly overlapping lofted helix segments."""
     z1 = z0 + height
-    overlap = TURN_OVERLAP_FRACTION * pitch
-    turn_solids = []
-    first_section = None
-    last_section = None
+    overlap = SEGMENT_OVERLAP_FRACTION * pitch
+    segments = []
 
     nominal_start = z0
     index = 0
@@ -147,64 +142,48 @@ def _make_thread_cutter(
         seg_start = nominal_start if index == 0 else nominal_start - overlap
         seg_end = nominal_end if nominal_end >= z1 - 1.0e-9 else nominal_end + overlap
 
-        solid, sec0, sec1 = _make_short_loft(
-            pitch,
-            seg_start,
-            seg_end,
-            z0,
-            r_inner,
-            r_outer,
-            root_half,
-            crest_half,
-            right_hand,
+        segments.append(
+            _make_short_loft(
+                pitch,
+                seg_start,
+                seg_end,
+                z0,
+                r_inner,
+                r_outer,
+                root_half,
+                crest_half,
+                right_hand,
+            )
         )
-        if first_section is None:
-            first_section = sec0
-        last_section = sec1
-        turn_solids.append(solid)
-
         nominal_start = nominal_end
         index += 1
 
-    if not turn_solids:
-        raise RuntimeError("No thread-turn solids were created")
+    if not segments:
+        raise RuntimeError("No thread cutter segments were created")
+    return segments
 
-    cutter = turn_solids[0]
-    for n, turn in enumerate(turn_solids[1:], start=2):
-        cutter = cutter.fuse(turn)
-        if cutter is None or cutter.isNull():
-            raise RuntimeError("Failed while fusing thread turn %d" % n)
-        try:
-            cutter = cutter.removeSplitter()
-        except Exception:
-            pass
 
-    if len(cutter.Solids) != 1:
+def _validate_single_solid(shape, label):
+    if shape is None or shape.isNull():
+        raise RuntimeError("%s is null" % label)
+    if len(shape.Solids) != 1:
         raise RuntimeError(
-            "Fused thread cutter must contain one solid; got %d" % len(cutter.Solids)
+            "%s must contain one solid; got %d" % (label, len(shape.Solids))
         )
-    if hasattr(cutter, "isValid") and not cutter.isValid():
-        raise RuntimeError("Fused thread cutter is invalid before cutting the sleeve")
-
-    return cutter, first_section, last_section
+    if hasattr(shape, "isValid") and not shape.isValid():
+        raise RuntimeError("%s is invalid" % label)
+    return shape
 
 
 def _finalize(shape):
-    if shape is None or shape.isNull():
-        raise RuntimeError("Thread boolean returned a null shape")
+    shape = _validate_single_solid(shape, "Final threaded sleeve")
     try:
         refined = shape.removeSplitter()
         if refined is not None and not refined.isNull():
             shape = refined
     except Exception:
         pass
-    if len(shape.Solids) != 1:
-        raise RuntimeError(
-            "Final threaded sleeve must contain one solid; got %d" % len(shape.Solids)
-        )
-    if hasattr(shape, "isValid") and not shape.isValid():
-        raise RuntimeError("Final threaded sleeve is invalid")
-    return shape
+    return _validate_single_solid(shape, "Refined threaded sleeve")
 
 
 class T2InternalThreadProxy:
@@ -253,18 +232,19 @@ class T2InternalThreadProxy:
         obj.addProperty("App::PropertyLength", "EffectiveRootDiameter", "Information")
         obj.addProperty("App::PropertyLength", "EffectiveRadialDepth", "Information")
         obj.addProperty("App::PropertyLength", "CADPitch", "Information")
+        obj.addProperty("App::PropertyInteger", "AppliedCutSegments", "Information")
         obj.addProperty("App::PropertyString", "GenerationMethod", "Information")
-        obj.GenerationMethod = "Overlapping one-turn lofts; no PipeShell"
+        obj.GenerationMethod = "Sequential short-loft subtraction; no PipeShell; no cutter fuse"
         obj.addProperty("App::PropertyString", "ProfileNote", "Information")
         obj.ProfileNote = (
-            "v0.1.9: M42x0.75 internal thread. The cutter is built from "
-            "overlapping one-turn OCCT loft solids and fused before the final cut."
+            "v0.1.10: M42x0.75 internal thread. Independent short OCCT loft "
+            "segments are subtracted sequentially from the sleeve."
         )
 
         for name in (
             "ThreadDesignation", "NominalDiameter", "Pitch", "CompensationScale",
             "EffectiveCrestDiameter", "EffectiveRootDiameter", "EffectiveRadialDepth",
-            "CADPitch", "GenerationMethod", "ProfileNote",
+            "CADPitch", "AppliedCutSegments", "GenerationMethod", "ProfileNote",
         ):
             obj.setEditorMode(name, 1)
 
@@ -329,14 +309,13 @@ class T2InternalThreadProxy:
         obj.EffectiveRootDiameter = root_d
         obj.EffectiveRadialDepth = depth
 
-        # Plain sleeve, with the cylindrical seam moved away from the thread start.
         eps = max(0.03, 0.04 * p)
         outer = Part.makeCylinder(r_outer, length)
         bore = Part.makeCylinder(r_crest, length + 2.0 * eps, App.Vector(0, 0, -eps))
-        sleeve = outer.cut(bore)
-        sleeve.rotate(App.Vector(0, 0, 0), App.Vector(0, 0, 1), seam_offset)
+        result = outer.cut(bore)
+        result.rotate(App.Vector(0, 0, 0), App.Vector(0, 0, 1), seam_offset)
+        result = _validate_single_solid(result, "Base sleeve")
 
-        # Same profile dimensions used by the working v0.1.5 thread.
         z0 = -p
         cutter_height = length + 2.0 * p
         radial_overlap = max(0.10 * scale, 0.25 * depth)
@@ -346,34 +325,48 @@ class T2InternalThreadProxy:
         root_half = min(0.36 * p, ideal_half_width + 0.08 * p)
         crest_half = 0.05 * p
 
-        cutter, first_section, last_section = _make_thread_cutter(
+        segments = _make_thread_segments(
             p, cutter_height, z0, x_inner, x_outer,
             root_half, crest_half, bool(obj.RightHand),
         )
 
-        common = sleeve.common(cutter)
-        if common.isNull() or common.Volume <= 1.0e-5:
+        applied = 0
+        debug_intersections = []
+        for n, segment in enumerate(segments, start=1):
+            common = result.common(segment)
+            if common is None or common.isNull() or common.Volume <= 1.0e-7:
+                # Expected for an end segment that lies fully outside the finite sleeve.
+                continue
+
+            debug_intersections.append(common)
+            candidate = result.cut(segment)
+            candidate = _validate_single_solid(candidate, "Thread cut after segment %d" % n)
+            result = candidate
+            applied += 1
+
+        if applied == 0:
             raise RuntimeError(
-                "One-turn lofted thread cutter does not intersect sleeve. "
+                "No lofted thread segment intersected the sleeve. "
                 "Enable DebugObjects and report the FreeCAD version."
             )
 
-        result = _finalize(sleeve.cut(cutter))
+        result = _finalize(result)
+        obj.AppliedCutSegments = applied
         obj.Shape = result
 
         if bool(obj.DebugObjects):
             doc = obj.Document
-            for name, shape in (
-                ("DEBUG_ThreadFirstSection", first_section),
-                ("DEBUG_ThreadLastSection", last_section),
-                ("DEBUG_ThreadCutter", cutter),
-                ("DEBUG_ThreadIntersection", common),
-            ):
-                old = doc.getObject(name)
+            for old_name in ("DEBUG_ThreadSegments", "DEBUG_ThreadIntersections"):
+                old = doc.getObject(old_name)
                 if old:
-                    doc.removeObject(name)
-                dbg = doc.addObject("Part::Feature", name)
-                dbg.Shape = shape
+                    doc.removeObject(old_name)
+
+            dbg_segments = doc.addObject("Part::Feature", "DEBUG_ThreadSegments")
+            dbg_segments.Shape = Part.makeCompound(segments)
+
+            if debug_intersections:
+                dbg_common = doc.addObject("Part::Feature", "DEBUG_ThreadIntersections")
+                dbg_common.Shape = Part.makeCompound(debug_intersections)
 
         try:
             obj.ViewObject.Deviation = 0.05
@@ -421,7 +414,7 @@ def create_t2_internal(
         doc = App.newDocument("OpticalThreads")
 
     obj = doc.addObject("PartDesign::FeaturePython", "T2_M42x0_75_Internal")
-    obj.Label = "T2 M42x0.75 Internal Thread v0.1.9"
+    obj.Label = "T2 M42x0.75 Internal Thread v0.1.10"
     T2InternalThreadProxy(obj)
     if Gui:
         T2InternalViewProvider(obj.ViewObject)
@@ -460,7 +453,7 @@ def _show_dialog():
         from PySide2 import QtWidgets
 
     dlg = QtWidgets.QDialog()
-    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.1.9")
+    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.1.10")
     layout = QtWidgets.QFormLayout(dlg)
 
     length_box = QtWidgets.QDoubleSpinBox()
@@ -545,8 +538,8 @@ def _show_dialog():
     layout.addRow("Crest truncation:", crest_box)
 
     note = QtWidgets.QLabel(
-        "v0.1.9 builds the cutter one revolution at a time with overlapping lofts.\n"
-        "No PipeShell is used. PETG compensation and fit controls are unchanged."
+        "v0.1.10 subtracts each short lofted thread segment directly from the sleeve.\n"
+        "No PipeShell and no fused multi-turn cutter are used."
     )
     layout.addRow(note)
 
