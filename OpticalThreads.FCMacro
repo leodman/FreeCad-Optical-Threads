@@ -1,19 +1,11 @@
 # -*- coding: utf-8 -*-
-"""FreeCAD Optical Threads v0.5.6 - native male/female/matched metric threads.
+"""FreeCAD Optical Threads v0.5.7 - native male/female/matched metric threads.
 
-v0.5.6 keeps nominal pitch locked, defaults material/process to No compensation
-(0%), keeps 3D PETG at 0.3%, keeps every generated thread centered on the
-world Z axis (X=0, Y=0), and implements both male and female lead-ins using the
-same robust final process:
-
-    2D chamfer section in (radius, Z)
-      -> explicit 360 degree annular/toroidal cutter around global Z
-      -> verify cutter is a valid solid
-      -> verify cutter intersects the finished thread
-      -> boolean cut the finished thread
-      -> store the cut result as the final PartDesign::Feature
-
-The proven native Part Design helix construction is otherwise unchanged.
+v0.5.7 adds common 60-degree optical/astronomy presets for M31x0.75,
+M48x0.75 and M54x0.75. Geometry behavior is unchanged from v0.5.6:
+nominal pitch stays locked, material/process defaults to No compensation (0%),
+3D PETG is 0.3%, all generated threads are centered on world X=0/Y=0, and
+male/female lead-ins use the same explicit annular cutter process.
 """
 import math
 import FreeCAD as App
@@ -24,8 +16,11 @@ except Exception:
     Gui=None
 
 THREAD_STANDARDS={
- "T2 / M42 x 0.75":dict(designation="T2 / M42 x 0.75",diameter=42.0,pitch=0.75,profile_angle=60.0,family="ISO metric 60 degree profile",verified=True),
  "1.25in Filter / M28.5 x 0.6":dict(designation="1.25in Filter / M28.5 x 0.6",diameter=28.5,pitch=0.6,profile_angle=60.0,family="Astronomy 1.25-inch filter/eyepiece metric thread",verified=True),
+ "Helical focuser / M31 x 0.75":dict(designation="Helical focuser / M31 x 0.75",diameter=31.0,pitch=0.75,profile_angle=60.0,family="Optical/astronomy metric 60 degree profile",verified=True),
+ "T2 / M42 x 0.75":dict(designation="T2 / M42 x 0.75",diameter=42.0,pitch=0.75,profile_angle=60.0,family="ISO metric 60 degree profile",verified=True),
+ "2in Filter / M48 x 0.75":dict(designation="2in Filter / M48 x 0.75",diameter=48.0,pitch=0.75,profile_angle=60.0,family="Astronomy 2-inch filter metric thread",verified=True),
+ "M54 Imaging / M54 x 0.75":dict(designation="M54 Imaging / M54 x 0.75",diameter=54.0,pitch=0.75,profile_angle=60.0,family="Astronomy imaging metric thread",verified=True),
  "Custom metric":None,
 }
 FIT_PRESETS={
@@ -163,13 +158,11 @@ def _lead_in_cut(doc,body,name,rz_points,label):
     if after>=before-tol:
         raise RuntimeError("%s cutter intersected but removed no measurable material"%label)
 
-    # Keep the actual cutter as an inspectable hidden object outside the Body.
     cutter_obj=doc.addObject("PartDesign::Feature",name+"Cutter")
     cutter_obj.Label=label+" cutter (hidden)"
     cutter_obj.Shape=cutter
     cutter_obj.Placement=App.Placement(App.Vector(0,0,0),App.Rotation())
 
-    # Final result remains inside the thread Body and becomes the Body tip.
     final=body.newObject("PartDesign::Feature",name)
     final.Label=label
     final.Shape=result
@@ -184,7 +177,7 @@ def _lead_in_cut(doc,body,name,rz_points,label):
 
 def _internal(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
     b=doc.addObject("PartDesign::Body","OpticalThread_Internal")
-    b.Label="%s Internal Thread v0.5.6"%s["designation"]
+    b.Label="%s Internal Thread v0.5.7"%s["designation"]
     b.Placement=App.Placement(App.Vector(0,0,0),App.Rotation())
     _meta(b,s,g,fit,mat,sh,sc,"Internal / female")
     outer=b.newObject("PartDesign::AdditiveCylinder","SleeveOuter"); outer.Radius=g["r_outer"]; outer.Height=g["body_length"]; outer.Angle=360; doc.recompute()
@@ -209,7 +202,7 @@ def _internal(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
 
 def _external(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
     b=doc.addObject("PartDesign::Body","OpticalThread_External")
-    b.Label="%s External Thread v0.5.6"%s["designation"]
+    b.Label="%s External Thread v0.5.7"%s["designation"]
     b.Placement=App.Placement(App.Vector(0,0,0),App.Rotation())
     _meta(b,s,g,fit,mat,sh,sc,"External / male")
     p=g["cad_pitch"]; z=-p; overlap=max(0.01*sc,0.015); rb=g["r_root"]-overlap
@@ -248,7 +241,6 @@ def create_external_thread(standard="T2 / M42 x 0.75",length=8.0,wall_thickness=
 
 def create_matched_pair(**kw):
     doc=kw.pop("document",None) or App.ActiveDocument or App.newDocument("OpticalThreads")
-    # Both parts are intentionally concentric at world X=0, Y=0.
     i=create_internal_thread(document=doc,**kw)
     e=create_external_thread(document=doc,**kw)
     i.Placement.Base.x=0; i.Placement.Base.y=0
@@ -260,6 +252,12 @@ def create_t2_internal(**kw):kw["standard"]="T2 / M42 x 0.75";return create_inte
 def create_t2_external(**kw):kw["standard"]="T2 / M42 x 0.75";return create_external_thread(**kw)
 def create_1_25_filter_internal(**kw):kw["standard"]="1.25in Filter / M28.5 x 0.6";return create_internal_thread(**kw)
 def create_1_25_filter_external(**kw):kw["standard"]="1.25in Filter / M28.5 x 0.6";return create_external_thread(**kw)
+def create_m31_internal(**kw):kw["standard"]="Helical focuser / M31 x 0.75";return create_internal_thread(**kw)
+def create_m31_external(**kw):kw["standard"]="Helical focuser / M31 x 0.75";return create_external_thread(**kw)
+def create_m48_internal(**kw):kw["standard"]="2in Filter / M48 x 0.75";return create_internal_thread(**kw)
+def create_m48_external(**kw):kw["standard"]="2in Filter / M48 x 0.75";return create_external_thread(**kw)
+def create_m54_internal(**kw):kw["standard"]="M54 Imaging / M54 x 0.75";return create_internal_thread(**kw)
+def create_m54_external(**kw):kw["standard"]="M54 Imaging / M54 x 0.75";return create_external_thread(**kw)
 
 
 def _show_dialog():
@@ -268,7 +266,7 @@ def _show_dialog():
         from PySide import QtGui; Q=QtGui
     except Exception:
         from PySide2 import QtWidgets as Q
-    dlg=Q.QDialog();dlg.setWindowTitle("FreeCAD Optical Threads v0.5.6");lay=Q.QFormLayout(dlg)
+    dlg=Q.QDialog();dlg.setWindowTitle("FreeCAD Optical Threads v0.5.7");lay=Q.QFormLayout(dlg)
     out=Q.QComboBox();[out.addItem(x) for x in OUTPUT_MODES];out.setCurrentText("Matched pair")
     std=Q.QComboBox();[std.addItem(x) for x in THREAD_STANDARDS];std.setCurrentText("T2 / M42 x 0.75")
     dia=Q.QDoubleSpinBox();dia.setRange(1,500);dia.setDecimals(3);dia.setValue(42);dia.setSuffix(" mm")
@@ -298,7 +296,7 @@ def _show_dialog():
     std.currentTextChanged.connect(stdchg);fit.currentTextChanged.connect(fitchg);mat.currentTextChanged.connect(matchg)
     stdchg(std.currentText());fitchg(fit.currentText());matchg(mat.currentText())
     for lab,w in [("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Length:",length),("Wall thickness (female):",wall),("Fit:",fit),("Material / process:",mat),("Shrinkage / compression:",shrink),("Pair diametral clearance:",clear),("Female root relief:",root),("Female crest truncation:",crest),("Thread lead-in chamfer:",lead),("Lead-in length:",lp)]:lay.addRow(lab,w)
-    lay.addRow(Q.QLabel("v0.5.6: default 0%; PETG 0.3%; nominal pitch locked; concentric at X=0/Y=0; explicit annular lead-in cutter."))
+    lay.addRow(Q.QLabel("v0.5.7: adds M31x0.75, M48x0.75 and M54x0.75 presets; geometry unchanged."))
     btn=Q.QDialogButtonBox(Q.QDialogButtonBox.Ok|Q.QDialogButtonBox.Cancel);btn.accepted.connect(dlg.accept);btn.rejected.connect(dlg.reject);lay.addRow(btn)
     if not (dlg.exec() if hasattr(dlg,"exec") else dlg.exec_()):return None
     st,ft,om=str(std.currentText()),str(fit.currentText()),str(out.currentText())
