@@ -1,11 +1,19 @@
 # -*- coding: utf-8 -*-
-"""FreeCAD Optical Threads v0.5.5 - native male/female/matched metric threads.
+"""FreeCAD Optical Threads v0.5.6 - native male/female/matched metric threads.
 
-v0.5.5 keeps nominal thread pitch locked, makes No compensation (0%) the
-default material/process, sets 3D PETG to 0.3%, and creates each lead-in as
-an explicit revolved annular cutter in its own Part Design Body.  The cutter
-is then Boolean-subtracted from the finished threaded Body.  The same final
-construction step is used for both internal and external threads.
+v0.5.6 keeps nominal pitch locked, defaults material/process to No compensation
+(0%), keeps 3D PETG at 0.3%, keeps every generated thread centered on the
+world Z axis (X=0, Y=0), and implements both male and female lead-ins using the
+same robust final process:
+
+    2D chamfer section in (radius, Z)
+      -> explicit 360 degree annular/toroidal cutter around global Z
+      -> verify cutter is a valid solid
+      -> verify cutter intersects the finished thread
+      -> boolean cut the finished thread
+      -> store the cut result as the final PartDesign::Feature
+
+The proven native Part Design helix construction is otherwise unchanged.
 """
 import math
 import FreeCAD as App
@@ -31,12 +39,14 @@ FIT_PRESETS={
 MATERIAL_PROCESS_PRESETS={"No compensation":0.0,"3D PETG":0.3,"Custom compensation":None}
 OUTPUT_MODES=("Internal / female","External / male","Matched pair")
 
+
 def _prop(o,t,n,g,v):
     try:o.addProperty(t,n,g)
     except Exception:pass
     setattr(o,n,v)
     try:o.setEditorMode(n,1)
     except Exception:pass
+
 
 def _std(name,d=None,p=None):
     if name not in THREAD_STANDARDS: raise ValueError("Unknown thread standard: %s"%name)
@@ -47,11 +57,13 @@ def _std(name,d=None,p=None):
     if d<=0 or p<=0:raise ValueError("Custom diameter and pitch must be > 0")
     return dict(designation="M%gx%g custom"%(d,p),diameter=d,pitch=p,profile_angle=60.0,family="Custom metric 60 degree profile",verified=False)
 
+
 def _fit(name,c=None,r=None,k=None):
     if name not in FIT_PRESETS:name="FDM print"
     v=FIT_PRESETS[name]
     if v is not None:return name,dict(v)
     return name,dict(diametral_clearance=0.20 if c is None else float(c),root_relief=0.10 if r is None else float(r),crest_truncation=0.05 if k is None else float(k))
+
 
 def _material(name,sh=None):
     if name not in MATERIAL_PROCESS_PRESETS:name="No compensation"
@@ -65,12 +77,21 @@ def _material(name,sh=None):
     if sh<0 or sh>=100:raise ValueError("Shrinkage percentage must be >= 0 and < 100")
     return name,sh,1.0/(1.0-sh/100.0)
 
+
 def _resolve(standard,fit,material,shrink,d,p,c,r,k):
     s=_std(standard,d,p); fn,fv=_fit(fit,c,r,k); mn,sh,sc=_material(material,shrink)
     return s,fn,fv,mn,sh,sc
 
+
 def _check(f,label):
-    if f.Shape.isNull() or len(f.Shape.Solids)!=1 or not f.Shape.isValid():raise RuntimeError("%s produced an invalid solid"%label)
+    if f.Shape.isNull() or len(f.Shape.Solids)!=1 or not f.Shape.isValid():
+        raise RuntimeError("%s produced an invalid solid"%label)
+
+
+def _check_shape(shape,label):
+    if shape.isNull() or len(shape.Solids)!=1 or not shape.isValid():
+        raise RuntimeError("%s produced an invalid solid"%label)
+
 
 def _meta(body,s,g,fit,mat,sh,sc,kind):
     _prop(body,"App::PropertyString","ThreadDesignation","Thread",s["designation"])
@@ -83,6 +104,7 @@ def _meta(body,s,g,fit,mat,sh,sc,kind):
     _prop(body,"App::PropertyFloat","ShrinkagePercent","Print compensation",sh)
     _prop(body,"App::PropertyFloat","CompensationScale","Print compensation",sc)
 
+
 def _igeom(s,f,sc,length,wall):
     d0,p0=float(s["diameter"]),float(s["pitch"]); L=float(length); W=float(wall)
     if min(d0,p0,L,W)<=0:raise ValueError("Diameter, pitch, length and wall must be > 0")
@@ -93,6 +115,7 @@ def _igeom(s,f,sc,length,wall):
     if depth<=0 or ro<=rrad+0.1:raise ValueError("Invalid internal geometry")
     return dict(nominal_diameter=d0,nominal_pitch=p0,cad_pitch=p,body_length=L,r_crest=rc,r_root=rrad,r_outer=ro,thread_depth=depth,half_width=depth*math.tan(math.radians(30)))
 
+
 def _egeom(s,f,sc,length,wall):
     d0,p0=float(s["diameter"]),float(s["pitch"]); L=float(length); W=float(wall)
     if min(d0,p0,L,W)<=0:raise ValueError("Diameter, pitch, length and wall must be > 0")
@@ -101,59 +124,68 @@ def _egeom(s,f,sc,length,wall):
     if depth<=0:raise ValueError("Invalid external geometry")
     return dict(nominal_diameter=d0,nominal_pitch=p0,cad_pitch=p,body_length=L,r_major=rm,r_root=rr,thread_depth=depth,half_width=depth*math.tan(math.radians(30)))
 
-def _toroid_boolean_cut(doc,body,name,pts,label):
-    """Revolve a closed chamfer profile into an annular cutter and subtract it."""
+
+def _annular_cutter(rz_points,label):
+    """Create a 360-degree cutter from closed (radius, Z) section points."""
+    if len(rz_points)<3:raise ValueError("%s requires at least three section points"%label)
+    pts=[App.Vector(float(r),0.0,float(z)) for r,z in rz_points]
+    if (pts[0]-pts[-1]).Length>1e-12:
+        pts.append(pts[0])
+    edges=[]
+    for i in range(len(pts)-1):
+        if (pts[i+1]-pts[i]).Length<=1e-12:
+            raise RuntimeError("%s has a zero-length cutter edge"%label)
+        edges.append(Part.makeLine(pts[i],pts[i+1]))
+    wire=Part.Wire(edges)
+    if not wire.isClosed():raise RuntimeError("%s cutter section is not closed"%label)
+    face=Part.Face(wire)
+    cutter=face.revolve(App.Vector(0,0,0),App.Vector(0,0,1),360.0)
+    _check_shape(cutter,label+" cutter")
+    if float(cutter.Volume)<=1e-9:raise RuntimeError("%s cutter has no volume"%label)
+    return cutter
+
+
+def _lead_in_cut(doc,body,name,rz_points,label):
+    """Common final operation: explicit annular cutter then actual BRep subtraction."""
     prev=body.Tip
-    before=float(prev.Shape.Volume)
+    before_shape=prev.Shape.copy()
+    before=float(before_shape.Volume)
+    cutter=_annular_cutter(rz_points,label)
 
-    # Separate, inspectable Part Design tool Body.
-    tool=doc.addObject("PartDesign::Body",name+"CutterBody")
-    tool.Label=label+" cutter body"
-    sk=tool.newObject("Sketcher::SketchObject",name+"CutterProfile")
-    sk.Label=label+" cutter profile"
-    sk.AttachmentSupport=tool.Origin.OriginFeatures[4]
-    sk.MapMode="FlatFace"
-    sk.addGeometry([Part.LineSegment(pts[i],pts[(i+1)%len(pts)]) for i in range(len(pts))],False)
-    doc.recompute()
+    common=before_shape.common(cutter)
+    if common.isNull() or float(common.Volume)<=1e-9:
+        raise RuntimeError("%s cutter does not intersect the finished thread"%label)
 
-    # Revolve the chamfer section 360 degrees to make the toroidal/annular cutter.
-    rev=tool.newObject("PartDesign::Revolution",name+"CutterRevolution")
-    rev.Label=label+" toroidal cutter"
-    rev.Profile=sk
-    rev.ReferenceAxis=(sk,["V_Axis"])
-    rev.Angle=360.0
-    try:
-        rev.Reversed=False
-        rev.Midplane=False
-    except Exception:pass
-    doc.recompute()
-    _check(rev,label+" cutter revolution")
-    if float(rev.Shape.Volume)<=0:
-        raise RuntimeError("%s cutter revolution has no volume"%label)
-
-    # Standard final operation for every thread: Boolean CUT finished thread - cutter.
-    cut=body.newObject("PartDesign::Boolean",name)
-    cut.Label=label+" Boolean cut"
-    cut.setObjects([tool])
-    cut.Type=1
-    doc.recompute()
-    _check(cut,label+" Boolean cut")
-
-    after=float(cut.Shape.Volume)
+    result=before_shape.cut(cutter)
+    _check_shape(result,label+" result")
+    after=float(result.Volume)
     tol=max(1e-8,abs(before)*1e-10)
     if after>=before-tol:
-        raise RuntimeError("%s toroidal cutter did not remove material"%label)
-    try:
-        sk.ViewObject.Visibility=False
-        tool.ViewObject.Visibility=False
-    except Exception:pass
-    body.Tip=cut
+        raise RuntimeError("%s cutter intersected but removed no measurable material"%label)
+
+    # Keep the actual cutter as an inspectable hidden object outside the Body.
+    cutter_obj=doc.addObject("PartDesign::Feature",name+"Cutter")
+    cutter_obj.Label=label+" cutter (hidden)"
+    cutter_obj.Shape=cutter
+    cutter_obj.Placement=App.Placement(App.Vector(0,0,0),App.Rotation())
+
+    # Final result remains inside the thread Body and becomes the Body tip.
+    final=body.newObject("PartDesign::Feature",name)
+    final.Label=label
+    final.Shape=result
+    final.Placement=App.Placement(App.Vector(0,0,0),App.Rotation())
+    body.Tip=final
     doc.recompute()
-    return cut
+    try:cutter_obj.ViewObject.Visibility=False
+    except Exception:pass
+    _check(final,label)
+    return final
+
 
 def _internal(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
     b=doc.addObject("PartDesign::Body","OpticalThread_Internal")
-    b.Label="%s Internal Thread v0.5.5"%s["designation"]
+    b.Label="%s Internal Thread v0.5.6"%s["designation"]
+    b.Placement=App.Placement(App.Vector(0,0,0),App.Rotation())
     _meta(b,s,g,fit,mat,sh,sc,"Internal / female")
     outer=b.newObject("PartDesign::AdditiveCylinder","SleeveOuter"); outer.Radius=g["r_outer"]; outer.Height=g["body_length"]; outer.Angle=360; doc.recompute()
     eps=max(0.03,0.04*g["cad_pitch"])
@@ -168,15 +200,17 @@ def _internal(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
         inner=g["r_crest"]-max(0.02,0.03*p)
         H=min(H,max(0.05,g["r_outer"]-0.10-inner))
         mouth=inner+H
-        pts=[App.Vector(inner,0,0),App.Vector(mouth,0,0),App.Vector(inner,H,0)]
-        tip=_toroid_boolean_cut(doc,b,"ThreadLeadIn",pts,"Female 45 degree lead-in")
+        rz=[(inner,0.0),(mouth,0.0),(inner,H)]
+        tip=_lead_in_cut(doc,b,"ThreadLeadIn",rz,"Female 45 degree lead-in")
     try:outer.ViewObject.Visibility=False;bore.ViewObject.Visibility=False;sk.ViewObject.Visibility=False
     except Exception:pass
-    b.Tip=tip; doc.recompute(); return b
+    b.Tip=tip; b.Placement.Base.x=0; b.Placement.Base.y=0; doc.recompute(); return b
+
 
 def _external(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
     b=doc.addObject("PartDesign::Body","OpticalThread_External")
-    b.Label="%s External Thread v0.5.5"%s["designation"]
+    b.Label="%s External Thread v0.5.6"%s["designation"]
+    b.Placement=App.Placement(App.Vector(0,0,0),App.Rotation())
     _meta(b,s,g,fit,mat,sh,sc,"External / male")
     p=g["cad_pitch"]; z=-p; overlap=max(0.01*sc,0.015); rb=g["r_root"]-overlap
     sk=b.newObject("Sketcher::SketchObject","ThreadProfile"); sk.AttachmentSupport=b.Origin.OriginFeatures[4]; sk.MapMode="FlatFace"
@@ -193,33 +227,40 @@ def _external(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
         H=min(H,max(0.05,base-minr))
         reduced=base-H
         outer=g["r_major"]+max(0.10,0.20*p)
-        pts=[App.Vector(reduced,start,0),App.Vector(outer,start,0),App.Vector(outer,start+H,0),App.Vector(base,start+H,0)]
-        tip=_toroid_boolean_cut(doc,b,"ThreadLeadIn",pts,"Male 45 degree lead-in")
+        rz=[(reduced,start),(outer,start),(outer,start+H),(base,start+H)]
+        tip=_lead_in_cut(doc,b,"ThreadLeadIn",rz,"Male 45 degree lead-in")
     try:sk.ViewObject.Visibility=False;core.ViewObject.Visibility=False
     except Exception:pass
-    b.Tip=tip; doc.recompute(); return b
+    b.Tip=tip; b.Placement.Base.x=0; b.Placement.Base.y=0; doc.recompute(); return b
+
 
 def create_internal_thread(standard="T2 / M42 x 0.75",length=8.0,wall_thickness=3.0,fit="FDM print",material_process="No compensation",shrinkage_percent=None,custom_diameter=None,custom_pitch=None,custom_clearance=None,root_relief=None,crest_truncation=None,right_hand=True,lead_in=True,lead_in_pitch=1.0,document=None):
     doc=document or App.ActiveDocument or App.newDocument("OpticalThreads")
     s,fn,fv,mn,sh,sc=_resolve(standard,fit,material_process,shrinkage_percent,custom_diameter,custom_pitch,custom_clearance,root_relief,crest_truncation)
     return _internal(doc,s,_igeom(s,fv,sc,length,wall_thickness),fn,mn,sh,sc,right_hand,lead_in,lead_in_pitch)
 
+
 def create_external_thread(standard="T2 / M42 x 0.75",length=8.0,wall_thickness=3.0,fit="FDM print",material_process="No compensation",shrinkage_percent=None,custom_diameter=None,custom_pitch=None,custom_clearance=None,root_relief=None,crest_truncation=None,right_hand=True,lead_in=True,lead_in_pitch=1.0,document=None):
     doc=document or App.ActiveDocument or App.newDocument("OpticalThreads")
     s,fn,fv,mn,sh,sc=_resolve(standard,fit,material_process,shrinkage_percent,custom_diameter,custom_pitch,custom_clearance,root_relief,crest_truncation)
     return _external(doc,s,_egeom(s,fv,sc,length,wall_thickness),fn,mn,sh,sc,right_hand,lead_in,lead_in_pitch)
 
+
 def create_matched_pair(**kw):
     doc=kw.pop("document",None) or App.ActiveDocument or App.newDocument("OpticalThreads")
-    i=create_internal_thread(document=doc,**kw); e=create_external_thread(document=doc,**kw)
-    try:e.Placement.Base.x+=max(i.Shape.BoundBox.XLength,e.Shape.BoundBox.XLength)+5
-    except Exception:pass
+    # Both parts are intentionally concentric at world X=0, Y=0.
+    i=create_internal_thread(document=doc,**kw)
+    e=create_external_thread(document=doc,**kw)
+    i.Placement.Base.x=0; i.Placement.Base.y=0
+    e.Placement.Base.x=0; e.Placement.Base.y=0
     doc.recompute(); return i,e
+
 
 def create_t2_internal(**kw):kw["standard"]="T2 / M42 x 0.75";return create_internal_thread(**kw)
 def create_t2_external(**kw):kw["standard"]="T2 / M42 x 0.75";return create_external_thread(**kw)
 def create_1_25_filter_internal(**kw):kw["standard"]="1.25in Filter / M28.5 x 0.6";return create_internal_thread(**kw)
 def create_1_25_filter_external(**kw):kw["standard"]="1.25in Filter / M28.5 x 0.6";return create_external_thread(**kw)
+
 
 def _show_dialog():
     if Gui is None:return create_matched_pair()
@@ -227,7 +268,7 @@ def _show_dialog():
         from PySide import QtGui; Q=QtGui
     except Exception:
         from PySide2 import QtWidgets as Q
-    dlg=Q.QDialog();dlg.setWindowTitle("FreeCAD Optical Threads v0.5.5");lay=Q.QFormLayout(dlg)
+    dlg=Q.QDialog();dlg.setWindowTitle("FreeCAD Optical Threads v0.5.6");lay=Q.QFormLayout(dlg)
     out=Q.QComboBox();[out.addItem(x) for x in OUTPUT_MODES];out.setCurrentText("Matched pair")
     std=Q.QComboBox();[std.addItem(x) for x in THREAD_STANDARDS];std.setCurrentText("T2 / M42 x 0.75")
     dia=Q.QDoubleSpinBox();dia.setRange(1,500);dia.setDecimals(3);dia.setValue(42);dia.setSuffix(" mm")
@@ -257,7 +298,7 @@ def _show_dialog():
     std.currentTextChanged.connect(stdchg);fit.currentTextChanged.connect(fitchg);mat.currentTextChanged.connect(matchg)
     stdchg(std.currentText());fitchg(fit.currentText());matchg(mat.currentText())
     for lab,w in [("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Length:",length),("Wall thickness (female):",wall),("Fit:",fit),("Material / process:",mat),("Shrinkage / compression:",shrink),("Pair diametral clearance:",clear),("Female root relief:",root),("Female crest truncation:",crest),("Thread lead-in chamfer:",lead),("Lead-in length:",lp)]:lay.addRow(lab,w)
-    lay.addRow(Q.QLabel("v0.5.5: default 0%; PETG 0.3%; nominal pitch locked; lead-in = revolved cutter + Boolean cut."))
+    lay.addRow(Q.QLabel("v0.5.6: default 0%; PETG 0.3%; nominal pitch locked; concentric at X=0/Y=0; explicit annular lead-in cutter."))
     btn=Q.QDialogButtonBox(Q.QDialogButtonBox.Ok|Q.QDialogButtonBox.Cancel);btn.accepted.connect(dlg.accept);btn.rejected.connect(dlg.reject);lay.addRow(btn)
     if not (dlg.exec() if hasattr(dlg,"exec") else dlg.exec_()):return None
     st,ft,om=str(std.currentText()),str(fit.currentText()),str(out.currentText())
@@ -265,5 +306,6 @@ def _show_dialog():
     obj=create_internal_thread(**kw) if om=="Internal / female" else create_external_thread(**kw) if om=="External / male" else create_matched_pair(**kw)
     if Gui:Gui.activeDocument().activeView().viewAxonometric();Gui.activeDocument().activeView().fitAll()
     return obj
+
 
 _show_dialog()
