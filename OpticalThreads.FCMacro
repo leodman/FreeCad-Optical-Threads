@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-FreeCAD Optical Threads - v0.1.8
+FreeCAD Optical Threads - v0.1.9
 T2 / M42 x 0.75 internal threaded sleeve generator.
 
-v0.1.8 boolean-safety redesign:
-- removes makePipeShell() from thread generation
-- builds the helical cutter from compatible radial profile sections
-- lofts those sections with Part.makeLoft(), using OCCT ThruSections
-- preserves the v0.1.5 dimensions, fit model, PETG compensation and seam workaround
-- validates the cutter and final result before exposing the solid
+v0.1.9 boolean-safety redesign:
+- no makePipeShell() thread sweep
+- builds short lofts, at most about one revolution each
+- neighboring turn solids overlap slightly and are fused
+- preserves M42x0.75 geometry, fit corrections and PETG compensation
+- preserves the cylinder-seam workaround from the working v0.1.5 geometry
 
 License: MIT
 """
@@ -55,25 +55,22 @@ MATERIAL_PROCESS_PRESETS = {
     "3D PETG": 0.7,
 }
 
-# Smooth loft accuracy. For the default ~12.6-turn cutter this produces
-# roughly 200 compatible cross-sections: detailed enough for M42x0.75 while
-# remaining much lighter than a mesh-like construction.
-LOFT_SECTIONS_PER_TURN = 16
+SECTIONS_PER_TURN = 24
+TURN_OVERLAP_FRACTION = 0.025
 
 
-def _thread_section(theta, z_center, r_inner, r_outer, root_half, crest_half):
-    """Create one closed four-edge radial thread-tool section."""
+def _section_wire(theta, z_center, r_inner, r_outer, root_half, crest_half):
+    """Closed four-edge radial section of the thread cutting tool."""
     c = math.cos(theta)
     s = math.sin(theta)
 
-    def point(radius, z):
+    def v(radius, z):
         return App.Vector(radius * c, radius * s, z)
 
-    q1 = point(r_inner, z_center - root_half)
-    q2 = point(r_outer, z_center - crest_half)
-    q3 = point(r_outer, z_center + crest_half)
-    q4 = point(r_inner, z_center + root_half)
-
+    q1 = v(r_inner, z_center - root_half)
+    q2 = v(r_outer, z_center - crest_half)
+    q3 = v(r_outer, z_center + crest_half)
+    q4 = v(r_inner, z_center + root_half)
     return Part.Wire([
         Part.makeLine(q1, q2),
         Part.makeLine(q2, q3),
@@ -82,7 +79,51 @@ def _thread_section(theta, z_center, r_inner, r_outer, root_half, crest_half):
     ])
 
 
-def _make_lofted_thread_cutter(
+def _make_short_loft(
+    pitch,
+    z_start,
+    z_end,
+    global_z0,
+    r_inner,
+    r_outer,
+    root_half,
+    crest_half,
+    right_hand,
+):
+    """Make one short helical loft using the global pitch/phase relation."""
+    span = z_end - z_start
+    if span <= 0:
+        raise RuntimeError("Invalid loft span")
+
+    turns = span / pitch
+    steps = max(6, int(math.ceil(turns * SECTIONS_PER_TURN)))
+    handed = 1.0 if right_hand else -1.0
+    sections = []
+
+    for i in range(steps + 1):
+        f = float(i) / float(steps)
+        z = z_start + span * f
+        # Phase is derived from absolute axial position. This is important:
+        # adjacent short lofts then describe the same continuous helix.
+        theta = handed * 2.0 * math.pi * ((z - global_z0) / pitch)
+        sections.append(
+            _section_wire(theta, z, r_inner, r_outer, root_half, crest_half)
+        )
+
+    loft = Part.makeLoft(sections, True, False, False, 3)
+    if loft is None or loft.isNull():
+        raise RuntimeError("A one-turn thread loft returned a null shape")
+    if len(loft.Solids) != 1:
+        raise RuntimeError(
+            "A one-turn thread loft must contain one solid; got %d" % len(loft.Solids)
+        )
+    if hasattr(loft, "isValid") and not loft.isValid():
+        raise RuntimeError("A one-turn thread loft is invalid")
+
+    return loft, sections[0], sections[-1]
+
+
+def _make_thread_cutter(
     pitch,
     height,
     z0,
@@ -90,64 +131,79 @@ def _make_lofted_thread_cutter(
     r_outer,
     root_half,
     crest_half,
-    right_hand=True,
+    right_hand,
 ):
-    """Build the thread cutter without PipeShell/p-curve sweep geometry."""
-    turns = height / pitch
-    steps = max(8, int(math.ceil(turns * LOFT_SECTIONS_PER_TURN)))
-    handed = 1.0 if right_hand else -1.0
+    """Build the full cutter from overlapping one-turn loft solids."""
+    z1 = z0 + height
+    overlap = TURN_OVERLAP_FRACTION * pitch
+    turn_solids = []
+    first_section = None
+    last_section = None
 
-    sections = []
-    for i in range(steps + 1):
-        f = float(i) / float(steps)
-        z = z0 + height * f
-        theta = handed * 2.0 * math.pi * turns * f
-        sections.append(
-            _thread_section(
-                theta,
-                z,
-                r_inner,
-                r_outer,
-                root_half,
-                crest_half,
-            )
+    nominal_start = z0
+    index = 0
+    while nominal_start < z1 - 1.0e-9:
+        nominal_end = min(nominal_start + pitch, z1)
+        seg_start = nominal_start if index == 0 else nominal_start - overlap
+        seg_end = nominal_end if nominal_end >= z1 - 1.0e-9 else nominal_end + overlap
+
+        solid, sec0, sec1 = _make_short_loft(
+            pitch,
+            seg_start,
+            seg_end,
+            z0,
+            r_inner,
+            r_outer,
+            root_half,
+            crest_half,
+            right_hand,
         )
+        if first_section is None:
+            first_section = sec0
+        last_section = sec1
+        turn_solids.append(solid)
 
-    # FreeCAD's Part.makeLoft maps to OCCT BRepOffsetAPI_ThruSections and
-    # performs compatibility matching between the section wires. This avoids
-    # the PipeShell edge/p-curve failure that BOPCheck reported on v0.1.5.
-    cutter = Part.makeLoft(sections, True, False, False, 3)
+        nominal_start = nominal_end
+        index += 1
 
-    if cutter is None or cutter.isNull():
-        raise RuntimeError("Lofted thread cutter is null")
+    if not turn_solids:
+        raise RuntimeError("No thread-turn solids were created")
+
+    cutter = turn_solids[0]
+    for n, turn in enumerate(turn_solids[1:], start=2):
+        cutter = cutter.fuse(turn)
+        if cutter is None or cutter.isNull():
+            raise RuntimeError("Failed while fusing thread turn %d" % n)
+        try:
+            cutter = cutter.removeSplitter()
+        except Exception:
+            pass
+
     if len(cutter.Solids) != 1:
         raise RuntimeError(
-            "Lofted thread cutter must contain one solid; got %d" % len(cutter.Solids)
+            "Fused thread cutter must contain one solid; got %d" % len(cutter.Solids)
         )
     if hasattr(cutter, "isValid") and not cutter.isValid():
-        raise RuntimeError("Lofted thread cutter is invalid before boolean cut")
+        raise RuntimeError("Fused thread cutter is invalid before cutting the sleeve")
 
-    return cutter, sections[0], sections[-1]
+    return cutter, first_section, last_section
 
 
-def _validate_final_shape(shape):
+def _finalize(shape):
     if shape is None or shape.isNull():
         raise RuntimeError("Thread boolean returned a null shape")
-
     try:
         refined = shape.removeSplitter()
         if refined is not None and not refined.isNull():
             shape = refined
     except Exception:
         pass
-
     if len(shape.Solids) != 1:
         raise RuntimeError(
-            "Final thread must contain exactly one solid; got %d" % len(shape.Solids)
+            "Final threaded sleeve must contain one solid; got %d" % len(shape.Solids)
         )
     if hasattr(shape, "isValid") and not shape.isValid():
-        raise RuntimeError("Final threaded sleeve is an invalid shape")
-
+        raise RuntimeError("Final threaded sleeve is invalid")
     return shape
 
 
@@ -159,77 +215,37 @@ class T2InternalThreadProxy:
 
         obj.addProperty("App::PropertyString", "ThreadDesignation", "Thread")
         obj.ThreadDesignation = "T2 / M42 x 0.75 internal"
-
         obj.addProperty("App::PropertyLength", "NominalDiameter", "Thread")
         obj.NominalDiameter = 42.0
-
         obj.addProperty("App::PropertyLength", "Pitch", "Thread")
         obj.Pitch = 0.75
-
         obj.addProperty("App::PropertyLength", "Length", "Geometry")
         obj.Length = 8.0
-
         obj.addProperty("App::PropertyLength", "WallThickness", "Geometry")
         obj.WallThickness = 3.0
 
         obj.addProperty("App::PropertyEnumeration", "Fit", "Fit")
         obj.Fit = list(FIT_PRESETS.keys())
         obj.Fit = "FDM print"
-
-        obj.addProperty(
-            "App::PropertyLength",
-            "DiametralClearance",
-            "Fit",
-            "Independent diametral fit allowance added to the female thread.",
-        )
+        obj.addProperty("App::PropertyLength", "DiametralClearance", "Fit")
         obj.DiametralClearance = FIT_PRESETS["FDM print"]
 
-        obj.addProperty(
-            "App::PropertyLength",
-            "RootRelief",
-            "Profile",
-            "Extra radial depth at the female thread root/valley.",
-        )
+        obj.addProperty("App::PropertyLength", "RootRelief", "Profile")
         obj.RootRelief = ROOT_RELIEF_PRESETS["FDM print"]
-
-        obj.addProperty(
-            "App::PropertyLength",
-            "CrestTruncation",
-            "Profile",
-            "Radial amount removed from the female crest/summit.",
-        )
+        obj.addProperty("App::PropertyLength", "CrestTruncation", "Profile")
         obj.CrestTruncation = CREST_TRUNC_PRESETS["FDM print"]
 
-        obj.addProperty(
-            "App::PropertyEnumeration",
-            "MaterialProcess",
-            "Print compensation",
-            "Material/process preset. Selecting one loads its nominal shrinkage percentage.",
-        )
+        obj.addProperty("App::PropertyEnumeration", "MaterialProcess", "Print compensation")
         obj.MaterialProcess = list(MATERIAL_PROCESS_PRESETS.keys())
         obj.MaterialProcess = "3D PETG"
-
-        obj.addProperty(
-            "App::PropertyFloat",
-            "ShrinkagePercent",
-            "Print compensation",
-            "Expected linear shrinkage/compression percentage. Editable; PETG nominal is 0.7%.",
-        )
+        obj.addProperty("App::PropertyFloat", "ShrinkagePercent", "Print compensation")
         obj.ShrinkagePercent = MATERIAL_PROCESS_PRESETS["3D PETG"]
-
-        obj.addProperty(
-            "App::PropertyFloat",
-            "CompensationScale",
-            "Print compensation",
-            "Computed CAD linear scale factor = 1/(1-shrinkage).",
-        )
+        obj.addProperty("App::PropertyFloat", "CompensationScale", "Print compensation")
 
         obj.addProperty("App::PropertyBool", "RightHand", "Thread")
         obj.RightHand = True
-
         obj.addProperty("App::PropertyAngle", "SeamOffset", "Advanced")
         obj.SeamOffset = 30.0
-
         obj.addProperty("App::PropertyBool", "DebugObjects", "Advanced")
         obj.DebugObjects = False
 
@@ -238,89 +254,74 @@ class T2InternalThreadProxy:
         obj.addProperty("App::PropertyLength", "EffectiveRadialDepth", "Information")
         obj.addProperty("App::PropertyLength", "CADPitch", "Information")
         obj.addProperty("App::PropertyString", "GenerationMethod", "Information")
-        obj.GenerationMethod = "Lofted compatible sections (no PipeShell)"
+        obj.GenerationMethod = "Overlapping one-turn lofts; no PipeShell"
         obj.addProperty("App::PropertyString", "ProfileNote", "Information")
         obj.ProfileNote = (
-            "v0.1.8: M42x0.75, 60 degree internal profile. "
-            "Clearance, root relief, crest truncation and PETG compensation are "
-            "preserved. The thread cutter is generated by OCCT ThruSections/loft "
-            "instead of makePipeShell to avoid invalid curve-on-surface BReps."
+            "v0.1.9: M42x0.75 internal thread. The cutter is built from "
+            "overlapping one-turn OCCT loft solids and fused before the final cut."
         )
 
         for name in (
-            "ThreadDesignation",
-            "NominalDiameter",
-            "Pitch",
-            "CompensationScale",
-            "EffectiveCrestDiameter",
-            "EffectiveRootDiameter",
-            "EffectiveRadialDepth",
-            "CADPitch",
-            "GenerationMethod",
-            "ProfileNote",
+            "ThreadDesignation", "NominalDiameter", "Pitch", "CompensationScale",
+            "EffectiveCrestDiameter", "EffectiveRootDiameter", "EffectiveRadialDepth",
+            "CADPitch", "GenerationMethod", "ProfileNote",
         ):
             obj.setEditorMode(name, 1)
 
     def onChanged(self, obj, prop):
         if prop == "Fit":
             fit = str(obj.Fit)
-            clearance = FIT_PRESETS.get(fit)
-            root = ROOT_RELIEF_PRESETS.get(fit)
-            crest = CREST_TRUNC_PRESETS.get(fit)
-            if clearance is not None:
-                obj.DiametralClearance = clearance
-            if root is not None:
-                obj.RootRelief = root
-            if crest is not None:
-                obj.CrestTruncation = crest
-
+            if FIT_PRESETS.get(fit) is not None:
+                obj.DiametralClearance = FIT_PRESETS[fit]
+            if ROOT_RELIEF_PRESETS.get(fit) is not None:
+                obj.RootRelief = ROOT_RELIEF_PRESETS[fit]
+            if CREST_TRUNC_PRESETS.get(fit) is not None:
+                obj.CrestTruncation = CREST_TRUNC_PRESETS[fit]
         elif prop == "MaterialProcess":
-            nominal_percent = MATERIAL_PROCESS_PRESETS.get(str(obj.MaterialProcess))
-            if nominal_percent is not None:
-                obj.ShrinkagePercent = nominal_percent
+            value = MATERIAL_PROCESS_PRESETS.get(str(obj.MaterialProcess))
+            if value is not None:
+                obj.ShrinkagePercent = value
 
     def execute(self, obj):
-        d_nominal = float(obj.NominalDiameter.Value)
-        p_nominal = float(obj.Pitch.Value)
-        length_nominal = float(obj.Length.Value)
-        wall_nominal = float(obj.WallThickness.Value)
-        clearance_nominal = float(obj.DiametralClearance.Value)
-        root_relief_nominal = float(obj.RootRelief.Value)
-        crest_trunc_nominal = float(obj.CrestTruncation.Value)
+        d0 = float(obj.NominalDiameter.Value)
+        p0 = float(obj.Pitch.Value)
+        length0 = float(obj.Length.Value)
+        wall0 = float(obj.WallThickness.Value)
+        clearance0 = float(obj.DiametralClearance.Value)
+        root_relief0 = float(obj.RootRelief.Value)
+        crest_trunc0 = float(obj.CrestTruncation.Value)
         seam_offset = float(obj.SeamOffset)
 
-        if min(d_nominal, p_nominal, length_nominal, wall_nominal) <= 0:
+        if min(d0, p0, length0, wall0) <= 0:
             raise ValueError("Diameter, pitch, length and wall thickness must be > 0")
-        if root_relief_nominal < 0 or crest_trunc_nominal < 0:
+        if root_relief0 < 0 or crest_trunc0 < 0:
             raise ValueError("RootRelief and CrestTruncation must be >= 0")
 
-        shrinkage_percent = float(obj.ShrinkagePercent)
-        if shrinkage_percent < 0.0 or shrinkage_percent >= 100.0:
+        shrink = float(obj.ShrinkagePercent)
+        if shrink < 0.0 or shrink >= 100.0:
             raise ValueError("ShrinkagePercent must be >= 0 and < 100")
-
-        scale = 1.0 / (1.0 - shrinkage_percent / 100.0)
+        scale = 1.0 / (1.0 - shrink / 100.0)
         obj.CompensationScale = scale
 
-        d = d_nominal * scale
-        p = p_nominal * scale
-        length = length_nominal * scale
-        wall = wall_nominal * scale
-        clearance_d = clearance_nominal * scale
-        root_relief = root_relief_nominal * scale
-        crest_trunc = crest_trunc_nominal * scale
+        d = d0 * scale
+        p = p0 * scale
+        length = length0 * scale
+        wall = wall0 * scale
+        clearance = clearance0 * scale
+        root_relief = root_relief0 * scale
+        crest_trunc = crest_trunc0 * scale
         obj.CADPitch = p
 
         basic_minor_d = d - 1.082531754 * p
-        crest_d = basic_minor_d + clearance_d + 2.0 * crest_trunc
-        root_d = d + clearance_d + 2.0 * root_relief
-
+        crest_d = basic_minor_d + clearance + 2.0 * crest_trunc
+        root_d = d + clearance + 2.0 * root_relief
         r_crest = crest_d / 2.0
         r_root = root_d / 2.0
         r_outer = d / 2.0 + wall
         depth = r_root - r_crest
 
         if depth <= 0:
-            raise ValueError("Invalid profile: root radius must exceed crest radius")
+            raise ValueError("Invalid thread profile depth")
         if r_outer <= r_root + 0.1:
             raise ValueError("Wall thickness is too small")
 
@@ -328,63 +329,46 @@ class T2InternalThreadProxy:
         obj.EffectiveRootDiameter = root_d
         obj.EffectiveRadialDepth = depth
 
-        # Base sleeve: same geometry and seam workaround used by v0.1.5.
+        # Plain sleeve, with the cylindrical seam moved away from the thread start.
         eps = max(0.03, 0.04 * p)
         outer = Part.makeCylinder(r_outer, length)
-        bore = Part.makeCylinder(
-            r_crest,
-            length + 2.0 * eps,
-            App.Vector(0, 0, -eps),
-        )
+        bore = Part.makeCylinder(r_crest, length + 2.0 * eps, App.Vector(0, 0, -eps))
         sleeve = outer.cut(bore)
-        sleeve.rotate(
-            App.Vector(0, 0, 0),
-            App.Vector(0, 0, 1),
-            seam_offset,
-        )
+        sleeve.rotate(App.Vector(0, 0, 0), App.Vector(0, 0, 1), seam_offset)
 
+        # Same profile dimensions used by the working v0.1.5 thread.
         z0 = -p
         cutter_height = length + 2.0 * p
-
         radial_overlap = max(0.10 * scale, 0.25 * depth)
         x_inner = r_crest - radial_overlap
         x_outer = r_root + max(0.04 * scale, 0.08 * depth)
-
         ideal_half_width = depth * math.tan(math.radians(30.0))
         root_half = min(0.36 * p, ideal_half_width + 0.08 * p)
         crest_half = 0.05 * p
 
-        cutter, first_section, last_section = _make_lofted_thread_cutter(
-            p,
-            cutter_height,
-            z0,
-            x_inner,
-            x_outer,
-            root_half,
-            crest_half,
-            bool(obj.RightHand),
+        cutter, first_section, last_section = _make_thread_cutter(
+            p, cutter_height, z0, x_inner, x_outer,
+            root_half, crest_half, bool(obj.RightHand),
         )
 
         common = sleeve.common(cutter)
         if common.isNull() or common.Volume <= 1.0e-5:
             raise RuntimeError(
-                "Lofted thread cutter does not intersect sleeve. "
+                "One-turn lofted thread cutter does not intersect sleeve. "
                 "Enable DebugObjects and report the FreeCAD version."
             )
 
-        result = sleeve.cut(cutter)
-        result = _validate_final_shape(result)
+        result = _finalize(sleeve.cut(cutter))
         obj.Shape = result
 
         if bool(obj.DebugObjects):
             doc = obj.Document
-            debug_shapes = (
+            for name, shape in (
                 ("DEBUG_ThreadFirstSection", first_section),
                 ("DEBUG_ThreadLastSection", last_section),
                 ("DEBUG_ThreadCutter", cutter),
                 ("DEBUG_ThreadIntersection", common),
-            )
-            for name, shape in debug_shapes:
+            ):
                 old = doc.getObject(name)
                 if old:
                     doc.removeObject(name)
@@ -401,31 +385,22 @@ class T2InternalThreadProxy:
 class T2InternalViewProvider:
     def __init__(self, vobj):
         vobj.Proxy = self
-
     def attach(self, vobj):
         self.ViewObject = vobj
-
     def updateData(self, obj, prop):
         pass
-
     def onChanged(self, vobj, prop):
         pass
-
     def getDisplayModes(self, vobj):
         return []
-
     def getDefaultDisplayMode(self):
         return "Flat Lines"
-
     def setDisplayMode(self, mode):
         return mode
-
     def getIcon(self):
         return ""
-
     def dumps(self):
         return None
-
     def loads(self, state):
         return None
 
@@ -446,7 +421,7 @@ def create_t2_internal(
         doc = App.newDocument("OpticalThreads")
 
     obj = doc.addObject("PartDesign::FeaturePython", "T2_M42x0_75_Internal")
-    obj.Label = "T2 M42x0.75 Internal Thread v0.1.8"
+    obj.Label = "T2 M42x0.75 Internal Thread v0.1.9"
     T2InternalThreadProxy(obj)
     if Gui:
         T2InternalViewProvider(obj.ViewObject)
@@ -454,12 +429,7 @@ def create_t2_internal(
     obj.Length = float(length)
     obj.WallThickness = float(wall_thickness)
     obj.Fit = fit if fit in FIT_PRESETS else "FDM print"
-    obj.MaterialProcess = (
-        material_process
-        if material_process in MATERIAL_PROCESS_PRESETS
-        else "No compensation"
-    )
-
+    obj.MaterialProcess = material_process if material_process in MATERIAL_PROCESS_PRESETS else "No compensation"
     obj.ShrinkagePercent = MATERIAL_PROCESS_PRESETS[str(obj.MaterialProcess)]
     if shrinkage_percent is not None:
         obj.ShrinkagePercent = float(shrinkage_percent)
@@ -490,7 +460,7 @@ def _show_dialog():
         from PySide2 import QtWidgets
 
     dlg = QtWidgets.QDialog()
-    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.1.8")
+    dlg.setWindowTitle("T2 / M42 x 0.75 Internal Thread v0.1.9")
     layout = QtWidgets.QFormLayout(dlg)
 
     length_box = QtWidgets.QDoubleSpinBox()
@@ -533,15 +503,15 @@ def _show_dialog():
     root_box.setRange(0.0, 1.0)
     root_box.setDecimals(3)
     root_box.setSingleStep(0.025)
-    root_box.setValue(ROOT_RELIEF_PRESETS["FDM print"])
     root_box.setSuffix(" mm radial")
+    root_box.setValue(ROOT_RELIEF_PRESETS["FDM print"])
 
     crest_box = QtWidgets.QDoubleSpinBox()
     crest_box.setRange(0.0, 0.5)
     crest_box.setDecimals(3)
     crest_box.setSingleStep(0.025)
-    crest_box.setValue(CREST_TRUNC_PRESETS["FDM print"])
     crest_box.setSuffix(" mm radial")
+    crest_box.setValue(CREST_TRUNC_PRESETS["FDM print"])
 
     def fit_changed(name):
         name = str(name)
@@ -555,10 +525,9 @@ def _show_dialog():
             crest_box.setValue(CREST_TRUNC_PRESETS[name])
 
     def material_changed(name):
-        name = str(name)
-        nominal = MATERIAL_PROCESS_PRESETS.get(name)
-        if nominal is not None:
-            shrinkage_box.setValue(nominal)
+        value = MATERIAL_PROCESS_PRESETS.get(str(name))
+        if value is not None:
+            shrinkage_box.setValue(value)
 
     fit_box.currentTextChanged.connect(fit_changed)
     material_box.currentTextChanged.connect(material_changed)
@@ -576,9 +545,8 @@ def _show_dialog():
     layout.addRow("Crest truncation:", crest_box)
 
     note = QtWidgets.QLabel(
-        "3D PETG defaults to 0.7% shrinkage, but the percentage is editable.\n"
-        "v0.1.8 replaces PipeShell with a lofted-section thread cutter\n"
-        "so the generated solid can participate in later CAD booleans."
+        "v0.1.9 builds the cutter one revolution at a time with overlapping lofts.\n"
+        "No PipeShell is used. PETG compensation and fit controls are unchanged."
     )
     layout.addRow(note)
 
