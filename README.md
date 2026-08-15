@@ -1,115 +1,59 @@
 # FreeCAD Optical Threads
 
-A small FreeCAD project for generating **real, printable optical/camera/telescope threads** without manually sketching and debugging a helix every time.
+A FreeCAD project for generating **editable, printable optical/camera/telescope threads** using native FreeCAD Part Design features wherever possible.
 
-## Current main version: v0.1.5
+## Current main version: v0.3.0
 
-The current generator creates:
+The current generator provides:
 
-- **T2 / M42 × 0.75 internal thread**
-- 60° metric-style profile
-- Parametric thread/sleeve length
-- Parametric wall thickness
+- **Verified preset:** T2 / M42 × 0.75 internal thread
+- **Custom metric** diameter/pitch entry using the same engine
+- Native `PartDesign::Body`
+- Native additive/subtractive primitives for the sleeve
+- Native conical thread lead-in
+- Sketcher-based ideal 60° triangular thread profile
+- Native `PartDesign::SubtractiveHelix`
+- Parametric thread/sleeve length and wall thickness
 - Practical fit presets
-- Independent diametral clearance
-- Independent root/valley relief
-- Independent crest/summit truncation
-- **Material/process shrinkage compensation**
-- User-editable shrinkage/compression percentage
-- Recomputes when parameters change
+- Independent diametral clearance, root relief, and crest truncation
+- Material/process shrinkage compensation
+- PETG 0.7% nominal compensation, editable by the user
 
-The output is a normal FreeCAD solid that can be fused, cut, linked, cloned, or used as a building block in a larger model.
+The generated result is not an opaque custom BRep. It remains a normal FreeCAD feature tree that can be inspected and edited directly.
 
-## Why this exists
+## Core design rule
 
-FreeCAD's native Hole tool supports modeled internal threads, but its built-in diameter/pitch tables do not include many optical thread combinations. Telescope and camera adapters frequently use sizes such as **M42 × 0.75**, which leaves users rebuilding helical thread geometry manually.
+**Prefer native FreeCAD features over custom geometry construction.**
 
-This project puts the standard and geometry behind a simple generator.
+The project originally experimented with raw Part-workbench helix sweeps and lofted cutters. Those approaches could display and even print, but they produced fragile or invalid BRep topology in later Boolean operations.
 
-## Installation as a macro
+The successful architecture is the same one used by normal FreeCAD modeling:
 
-1. Open FreeCAD.
-2. Open **Macro → Macros…**
-3. Use **User macros location** to find your macro folder.
-4. Copy `OpticalThreads.FCMacro` into that folder.
-5. Run `OpticalThreads`.
+1. Create a `PartDesign::Body`.
+2. Create the base sleeve with native primitives.
+3. Create the thread profile as a Sketcher triangle.
+4. Create the thread with `PartDesign::SubtractiveHelix` for internal threads.
+5. Keep the entire feature tree editable.
 
-The macro opens a small dialog. The generated object remains parametric after creation.
+Future development should follow this rule unless a required operation genuinely cannot be represented with native FreeCAD features.
 
-## Print-fit correction
+## Parametric architecture
 
-Physical print testing showed that simply adding clearance was not enough. The printed M42 × 0.75 female thread could engage only after the sleeve was slit so it could flex outward, and comparison with a known-good metal thread showed that the generated thread valley was too shallow.
+v0.3.0 separates three layers:
 
-The corrected geometry therefore keeps the controls separate:
+### 1. Thread standard
 
-- **Nominal pitch remains 0.75 mm.**
-- Fit clearance does not substitute for thread depth.
-- `RootRelief` cuts the female valley/root farther outward radially.
-- `CrestTruncation` removes material from the female summit/crest independently.
-- `DiametralClearance` remains an independent mating-fit parameter.
+The standard describes the nominal thread only, for example:
 
-For the current **FDM print** preset:
+- Diameter: 42.0 mm
+- Pitch: 0.75 mm
+- Profile angle: 60°
 
-| Parameter | Value |
-|---|---:|
-| Diametral clearance | +0.20 mm |
-| Root relief | +0.10 mm radial |
-| Crest truncation | +0.05 mm radial |
+The current verified table contains T2 / M42 × 0.75. A `Custom metric` option allows another diameter and pitch to use the same native generator before that combination is promoted to a verified preset.
 
-For M42 × 0.75, the macro uses the ISO-style basic internal minor diameter:
+### 2. Fit correction
 
-`D1 = D - 1.082531754 × P`
-
-Without material compensation, the FDM preset gives approximately:
-
-- Basic internal minor diameter: **41.1881 mm**
-- Effective female crest diameter: **41.4881 mm**
-- Effective female root diameter: **42.4000 mm**
-- Effective radial groove depth: **0.4560 mm**
-
-The important design rule is that **print clearance and thread depth are separate controls**. The generator may truncate the thread summit for printability, but it still carves the valley fully enough to avoid the shallow-thread failure seen in the first printed test.
-
-## v0.1.5 material/process compensation
-
-A PETG print measured about **41.20 mm** at the female inner/crest diameter, versus about **41.49 mm** in the uncompensated CAD geometry. That difference is close to 0.7% at this size.
-
-The macro therefore has a single **Material / process** selection plus an editable **Shrinkage / compression %** field.
-
-Current material/process choices:
-
-| Material / process | Nominal shrinkage |
-|---|---:|
-| No compensation | 0.0% |
-| 3D PETG | 0.7% |
-
-Selecting **3D PETG** loads **0.7%** as the nominal value, but the percentage remains editable. This lets a particular printer/material/process be calibrated empirically without changing the thread fit preset.
-
-The compensation uses the exact inverse linear scale:
-
-`scale = 1 / (1 - shrinkage)`
-
-For 0.7%:
-
-`scale = 1 / 0.993 = 1.007049345...`
-
-This scale is applied consistently to all generated linear CAD dimensions, including:
-
-- nominal diameter
-- pitch
-- thread/sleeve length
-- wall thickness
-- diametral clearance
-- root relief
-- crest truncation
-- small geometric robustness allowances used by the swept cutter
-
-The intention is that, after the assumed linear shrinkage, the cooled part returns toward the requested nominal geometry. With 0.7% compensation, the CAD pitch is about **0.75529 mm**, targeting approximately **0.750 mm** after shrinkage.
-
-This is an empirical printing compensation, not a universal PETG material constant. Actual dimensional behavior depends on filament formulation, printer, extrusion calibration, temperature, cooling, print orientation, and slicer settings.
-
-## Fit presets
-
-These are practical printing/machining presets, not certified ISO tolerance classes such as 6H/6g.
+Fit is independent of the standard. The female-thread controls are:
 
 | Fit | Diametral clearance | Root relief | Crest truncation |
 |---|---:|---:|---:|
@@ -120,36 +64,78 @@ These are practical printing/machining presets, not certified ISO tolerance clas
 | FDM print | +0.20 mm | +0.10 mm radial | +0.05 mm radial |
 | Custom | user selected | user selected | user selected |
 
-Printer, resin, filament, machining process, material, and the mating commercial part can all require adjustment. Short test rings are recommended before printing a final adapter.
+These are practical fit presets, not certified ISO tolerance classes.
 
-## T2 geometry
+### 3. Material/process compensation
 
-- Designation: **M42 × 0.75**
-- Nominal diameter: **42.0 mm**
-- Nominal pitch: **0.75 mm**
-- Thread angle: **60°**
-- Default hand: right-hand
+Material shrinkage is also independent of the standard and fit.
 
-## Planned next steps
+Current process presets:
 
-- M42 × 0.75 external
-- Paired male/female generation so printed parts are generated as a matched pair
-- Additional optical standards:
-  - M48 × 0.75
-  - M28.5 × 0.6 (1.25-inch filters)
-  - C-mount 1\"-32 UN
-  - SM1 / 1.035\"-40
-- More material/process compensation presets as they are physically calibrated
-- Entry chamfer/runout controls
-- Convert the macro into a proper **Optical Threads Workbench**
-- Thread library stored as data rather than hard-coded UI entries
-- Optional true ISO tolerance classes where the standard provides enough information
+| Material / process | Nominal shrinkage |
+|---|---:|
+| No compensation | 0.0% |
+| 3D PETG | 0.7% |
+
+The compensation is:
+
+`scale = 1 / (1 - shrinkage)`
+
+For PETG at 0.7%:
+
+`scale = 1 / 0.993 = 1.007049345...`
+
+The scale is applied to all generated linear CAD dimensions, including pitch. Thus a nominal 0.750 mm pitch becomes about 0.75529 mm in compensated CAD, targeting approximately 0.750 mm after 0.7% linear shrinkage.
+
+This is an empirical process compensation, not a universal PETG constant.
+
+## Female-thread geometry
+
+For the current metric 60° implementation, the basic internal minor-diameter relation used is:
+
+`D1 = D - 1.082531754 × P`
+
+Fit corrections are applied after the nominal thread definition and before material/process scaling is expressed in the generated CAD geometry.
+
+The thread profile itself remains a simple ideal pointed 60° triangle. This intentionally follows the simple native modeling strategy that proved reliable in FreeCAD.
+
+## Thread lead-in
+
+v0.3.0 adds a native conical lead-in at the sleeve entrance using `PartDesign::SubtractiveCone` **before** the thread helix is created.
+
+This avoids trying to identify or chamfer a complicated threaded edge. The helix is then cut through the already prepared entrance.
+
+## Installation as a macro
+
+1. Open FreeCAD.
+2. Open **Macro → Macros…**.
+3. Use **User macros location** to find your macro folder.
+4. Copy `OpticalThreads.FCMacro` into that folder.
+5. Run `OpticalThreads`.
+
+The macro opens a parameter dialog and creates the native editable feature tree.
 
 ## FreeCAD compatibility
 
 Target: FreeCAD 1.x.
 
-The macro uses FreeCAD's `Part` geometry API (`makeHelix` / `makeLongHelix`, sweep/pipe shell, Boolean cut) and creates a `PartDesign::FeaturePython` object.
+The macro uses native FreeCAD objects including:
+
+- `PartDesign::Body`
+- `PartDesign::AdditiveCylinder`
+- `PartDesign::SubtractiveCylinder`
+- `PartDesign::SubtractiveCone`
+- `Sketcher::SketchObject`
+- `PartDesign::SubtractiveHelix`
+
+## Planned next steps
+
+- Matching M42 × 0.75 external thread using native `PartDesign::AdditiveHelix`
+- Paired male/female generation from the same standard/fit/material definition
+- Additional verified optical-thread presets
+- More calibrated material/process presets
+- Better runout/relief controls
+- Conversion into a proper Optical Threads Workbench
 
 ## License
 
