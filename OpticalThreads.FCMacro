@@ -1,19 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-FreeCAD Optical Threads - v0.3.0
+FreeCAD Optical Threads - v0.3.1
 Parametric native Part Design optical-thread generator.
 
 Design rules:
 - thread standards are data, not geometry code
 - fit correction and material/process compensation are independent layers
 - generated parts remain editable native FreeCAD feature trees
-- use Part Design / Sketcher features before low-level custom BRep geometry
+- use native Part Design / Sketcher features before low-level custom BRep geometry
 
-Current verified preset:
-- T2 / M42 x 0.75 internal
-
-Also includes a Custom metric entry so the same engine can be exercised with
-other diameter/pitch combinations before they are promoted to verified presets.
+v0.3.1:
+- preserves the native SubtractiveHelix architecture proven in v0.2.0
+- makes the conical lead-in optional and OFF by default
+- when enabled, the lead-in slightly overcuts the bore to avoid exact tangent/coincident faces
 
 License: MIT
 """
@@ -29,10 +28,6 @@ except Exception:
     Gui = None
 
 
-# ---------------------------------------------------------------------------
-# Data layer
-# ---------------------------------------------------------------------------
-
 THREAD_STANDARDS = {
     "T2 / M42 x 0.75": {
         "designation": "T2 / M42 x 0.75",
@@ -45,10 +40,6 @@ THREAD_STANDARDS = {
     "Custom metric": None,
 }
 
-# Fit corrections are expressed at nominal/model size before material scaling.
-# DiametralClearance changes the female thread diametrally.
-# RootRelief deepens the female valley radially.
-# CrestTruncation enlarges the female crest/bore radially.
 FIT_PRESETS = {
     "Basic / nominal": {
         "diametral_clearance": 0.00,
@@ -83,10 +74,6 @@ MATERIAL_PROCESS_PRESETS = {
     "3D PETG": 0.7,
 }
 
-
-# ---------------------------------------------------------------------------
-# Parameter/calculation layer
-# ---------------------------------------------------------------------------
 
 def _add_info_property(obj, prop_type, name, group, value, readonly=True):
     try:
@@ -127,12 +114,7 @@ def _resolve_standard(standard, custom_diameter=None, custom_pitch=None):
     }
 
 
-def _resolve_fit(
-    fit,
-    custom_clearance=None,
-    root_relief=None,
-    crest_truncation=None,
-):
+def _resolve_fit(fit, custom_clearance=None, root_relief=None, crest_truncation=None):
     if fit not in FIT_PRESETS:
         fit = "FDM print"
 
@@ -158,13 +140,11 @@ def _resolve_material(material_process, shrinkage_percent=None):
     if shrink < 0.0 or shrink >= 100.0:
         raise ValueError("Shrinkage percentage must be >= 0 and < 100")
 
-    # Exact inverse linear compensation. Example: PETG 0.7% -> 1/0.993.
     scale = 1.0 / (1.0 - shrink / 100.0)
     return material_process, shrink, scale
 
 
 def _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness):
-    """Compute female-thread geometry from nominal standard + fit + process scale."""
     d0 = float(thread["diameter"])
     p0 = float(thread["pitch"])
     angle = float(thread["profile_angle"])
@@ -174,15 +154,15 @@ def _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness
     if min(d0, p0, length0, wall0) <= 0.0:
         raise ValueError("Diameter, pitch, length and wall thickness must be > 0")
     if abs(angle - 60.0) > 1.0e-9:
-        raise ValueError("v0.3.0 currently supports 60 degree metric profiles only")
+        raise ValueError("This version supports 60 degree metric profiles only")
 
     clearance0 = float(fit_values["diametral_clearance"])
     root_relief0 = float(fit_values["root_relief"])
     crest_trunc0 = float(fit_values["crest_truncation"])
+
     if root_relief0 < 0.0 or crest_trunc0 < 0.0:
         raise ValueError("Root relief and crest truncation must be >= 0")
 
-    # Material/process scaling applies to every linear dimension, including pitch.
     d = d0 * scale
     p = p0 * scale
     body_length = length0 * scale
@@ -191,8 +171,6 @@ def _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness
     root_relief = root_relief0 * scale
     crest_trunc = crest_trunc0 * scale
 
-    # ISO metric basic internal-thread minor diameter coefficient retained from
-    # the print-tested M42 implementation. Fit corrections are applied separately.
     basic_minor_d = d - 1.082531754 * p
     crest_d = basic_minor_d + clearance + 2.0 * crest_trunc
     root_d = d + clearance + 2.0 * root_relief
@@ -229,9 +207,14 @@ def _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness
     }
 
 
-# ---------------------------------------------------------------------------
-# Native FreeCAD feature layer
-# ---------------------------------------------------------------------------
+def _validate_feature(feature, label):
+    if feature.Shape.isNull():
+        raise RuntimeError("%s returned a null shape" % label)
+    if len(feature.Shape.Solids) != 1:
+        raise RuntimeError("%s must produce one solid; got %d" % (label, len(feature.Shape.Solids)))
+    if not feature.Shape.isValid():
+        raise RuntimeError("%s produced an invalid solid" % label)
+
 
 def _create_native_internal_thread(
     doc,
@@ -242,15 +225,14 @@ def _create_native_internal_thread(
     shrinkage_percent,
     compensation_scale,
     right_hand=True,
-    lead_in=True,
+    lead_in=False,
 ):
     designation = thread["designation"]
-    safe_name = designation.replace(" ", "_").replace("/", "").replace(".", "_").replace("x", "x")
+    safe_name = designation.replace(" ", "_").replace("/", "").replace(".", "_")
 
     body = doc.addObject("PartDesign::Body", "OpticalThread_%s_Internal" % safe_name)
-    body.Label = "%s Internal Thread v0.3.0" % designation
+    body.Label = "%s Internal Thread v0.3.1" % designation
 
-    # Design/metadata remain visible on the native Body.
     _add_info_property(body, "App::PropertyString", "ThreadDesignation", "Thread", designation)
     _add_info_property(body, "App::PropertyString", "ThreadFamily", "Thread", thread["family"])
     _add_info_property(body, "App::PropertyBool", "VerifiedPreset", "Thread", bool(thread["verified"]))
@@ -271,9 +253,9 @@ def _create_native_internal_thread(
     _add_info_property(body, "App::PropertyLength", "EffectiveCrestDiameter", "Information", geom["crest_diameter"])
     _add_info_property(body, "App::PropertyLength", "EffectiveRootDiameter", "Information", geom["root_diameter"])
     _add_info_property(body, "App::PropertyLength", "EffectiveRadialDepth", "Information", geom["thread_depth"])
+    _add_info_property(body, "App::PropertyBool", "LeadInEnabled", "Information", bool(lead_in))
     _add_info_property(body, "App::PropertyString", "GenerationMethod", "Information", "Native Part Design primitives + Sketcher triangle + SubtractiveHelix")
 
-    # 1) Native sleeve cylinder.
     outer = body.newObject("PartDesign::AdditiveCylinder", "SleeveOuter")
     outer.Label = "Sleeve outer cylinder"
     outer.Radius = geom["r_outer"]
@@ -281,7 +263,6 @@ def _create_native_internal_thread(
     outer.Angle = 360
     doc.recompute()
 
-    # 2) Native bore at the female crest/minor diameter.
     bore_eps = max(0.03, 0.04 * geom["cad_pitch"])
     bore = body.newObject("PartDesign::SubtractiveCylinder", "SleeveBore")
     bore.Label = "Female thread crest bore"
@@ -293,35 +274,31 @@ def _create_native_internal_thread(
         App.Rotation(App.Vector(0, 0, 1), 0),
     )
     doc.recompute()
+    _validate_feature(bore, "Native Part Design sleeve/bore")
 
-    if bore.Shape.isNull() or len(bore.Shape.Solids) != 1 or not bore.Shape.isValid():
-        raise RuntimeError("Native Part Design sleeve/bore produced an invalid base solid")
-
-    # 3) Native conical thread lead-in. It is created BEFORE the helix, so no
-    # threaded-edge lookup is needed. A 45-degree lead-in reaches approximately
-    # the thread root radius over one radial thread depth.
+    # Optional lead-in. Kept OFF by default because the v0.2.0 no-lead-in chain
+    # has already demonstrated robust downstream Part booleans.
+    # If enabled, deliberately overcut the bore very slightly so the cone never
+    # terminates exactly tangent/coincident with the cylindrical bore surface.
     lead_feature = None
     if lead_in:
+        lead_overcut = max(0.01 * compensation_scale, 0.015)
         lead_height = max(geom["thread_depth"], 0.25 * geom["cad_pitch"])
         lead_feature = body.newObject("PartDesign::SubtractiveCone", "ThreadLeadIn")
-        lead_feature.Label = "45 degree female thread lead-in"
-        lead_feature.Radius1 = geom["r_root"]
-        lead_feature.Radius2 = geom["r_crest"]
+        lead_feature.Label = "Female thread conical lead-in (non-tangent)"
+        lead_feature.Radius1 = geom["r_root"] + lead_overcut
+        lead_feature.Radius2 = geom["r_crest"] + lead_overcut
         lead_feature.Height = lead_height
         lead_feature.Angle = 360
         doc.recompute()
+        _validate_feature(lead_feature, "Native Part Design lead-in")
 
-        if lead_feature.Shape.isNull() or len(lead_feature.Shape.Solids) != 1 or not lead_feature.Shape.isValid():
-            raise RuntimeError("Native Part Design lead-in produced an invalid solid")
-
-    # 4) Ideal pointed 60-degree triangular profile on the XZ plane.
     profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
     profile.Label = "%s ideal 60 degree thread triangle" % designation
     xz_plane = body.Origin.OriginFeatures[4]
     profile.AttachmentSupport = xz_plane
     profile.MapMode = "FlatFace"
 
-    # Extend helix one pitch below and above the finite sleeve.
     p = geom["cad_pitch"]
     z_start = -p
     q1 = App.Vector(geom["r_crest"], z_start - geom["half_width"], 0)
@@ -335,7 +312,6 @@ def _create_native_internal_thread(
     ], False)
     doc.recompute()
 
-    # 5) Native Part Design subtractive helix.
     helix = body.newObject("PartDesign::SubtractiveHelix", "ThreadHelix")
     helix.Label = "%s subtractive helix" % designation
     helix.Profile = profile
@@ -349,15 +325,7 @@ def _create_native_internal_thread(
     helix.LeftHanded = not bool(right_hand)
     helix.Reversed = 0
     doc.recompute()
-
-    if helix.Shape.isNull():
-        raise RuntimeError("Native SubtractiveHelix returned a null shape")
-    if len(helix.Shape.Solids) != 1:
-        raise RuntimeError(
-            "Native SubtractiveHelix must produce one solid; got %d" % len(helix.Shape.Solids)
-        )
-    if not helix.Shape.isValid():
-        raise RuntimeError("Native SubtractiveHelix produced an invalid solid")
+    _validate_feature(helix, "Native SubtractiveHelix")
 
     try:
         outer.ViewObject.Visibility = False
@@ -375,10 +343,6 @@ def _create_native_internal_thread(
     return body
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def create_internal_thread(
     standard="T2 / M42 x 0.75",
     length=8.0,
@@ -392,7 +356,7 @@ def create_internal_thread(
     root_relief=None,
     crest_truncation=None,
     right_hand=True,
-    lead_in=True,
+    lead_in=False,
     document=None,
 ):
     doc = document or App.ActiveDocument
@@ -400,23 +364,9 @@ def create_internal_thread(
         doc = App.newDocument("OpticalThreads")
 
     thread = _resolve_standard(standard, custom_diameter, custom_pitch)
-    fit_name, fit_values = _resolve_fit(
-        fit,
-        custom_clearance,
-        root_relief,
-        crest_truncation,
-    )
-    material_process, shrink, scale = _resolve_material(
-        material_process,
-        shrinkage_percent,
-    )
-    geom = _compute_internal_geometry(
-        thread,
-        fit_values,
-        scale,
-        length,
-        wall_thickness,
-    )
+    fit_name, fit_values = _resolve_fit(fit, custom_clearance, root_relief, crest_truncation)
+    material_process, shrink, scale = _resolve_material(material_process, shrinkage_percent)
+    geom = _compute_internal_geometry(thread, fit_values, scale, length, wall_thickness)
 
     body = _create_native_internal_thread(
         doc,
@@ -437,15 +387,10 @@ def create_internal_thread(
     return body
 
 
-# Backward-compatible convenience function.
 def create_t2_internal(**kwargs):
     kwargs["standard"] = "T2 / M42 x 0.75"
     return create_internal_thread(**kwargs)
 
-
-# ---------------------------------------------------------------------------
-# Dialog
-# ---------------------------------------------------------------------------
 
 def _show_dialog():
     if Gui is None:
@@ -458,7 +403,7 @@ def _show_dialog():
         from PySide2 import QtWidgets
 
     dlg = QtWidgets.QDialog()
-    dlg.setWindowTitle("FreeCAD Optical Threads v0.3.0")
+    dlg.setWindowTitle("FreeCAD Optical Threads v0.3.1")
     layout = QtWidgets.QFormLayout(dlg)
 
     standard_box = QtWidgets.QComboBox()
@@ -529,7 +474,7 @@ def _show_dialog():
     crest_box.setValue(FIT_PRESETS["FDM print"]["crest_truncation"])
 
     lead_box = QtWidgets.QCheckBox()
-    lead_box.setChecked(True)
+    lead_box.setChecked(False)
 
     def standard_changed(name):
         name = str(name)
@@ -576,11 +521,11 @@ def _show_dialog():
     layout.addRow("Diametral clearance:", clearance_box)
     layout.addRow("Root relief:", root_box)
     layout.addRow("Crest truncation:", crest_box)
-    layout.addRow("Native conical lead-in:", lead_box)
+    layout.addRow("Experimental conical lead-in:", lead_box)
 
     note = QtWidgets.QLabel(
-        "v0.3.0: standard geometry + fit correction + material compensation.\n"
-        "Output remains an editable native Part Design feature tree."
+        "v0.3.1: native Part Design thread engine.\n"
+        "Lead-in is OFF by default to preserve the proven Boolean-safe helix chain."
     )
     layout.addRow(note)
 
