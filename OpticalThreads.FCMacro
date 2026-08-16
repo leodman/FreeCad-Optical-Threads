@@ -21,6 +21,7 @@ THREAD_STANDARDS={
  "T2 / M42 x 0.75":dict(designation="T2 / M42 x 0.75",diameter=42.0,pitch=0.75,profile_angle=60.0,family="ISO metric 60 degree profile",verified=True),
  "2in Filter / M48 x 0.75":dict(designation="2in Filter / M48 x 0.75",diameter=48.0,pitch=0.75,profile_angle=60.0,family="Astronomy 2-inch filter metric thread",verified=True),
  "M54 Imaging / M54 x 0.75":dict(designation="M54 Imaging / M54 x 0.75",diameter=54.0,pitch=0.75,profile_angle=60.0,family="Astronomy imaging metric thread",verified=True),
+ "M95 Lens Retaining / M95 x 1":dict(designation="M95 Lens Retaining / M95 x 1",diameter=95.0,pitch=1.0,profile_angle=60.0,family="Optical lens retaining metric 60 degree profile",verified=True),
  "Custom metric":None,
 }
 FIT_PRESETS={
@@ -258,6 +259,8 @@ def create_m48_internal(**kw):kw["standard"]="2in Filter / M48 x 0.75";return cr
 def create_m48_external(**kw):kw["standard"]="2in Filter / M48 x 0.75";return create_external_thread(**kw)
 def create_m54_internal(**kw):kw["standard"]="M54 Imaging / M54 x 0.75";return create_internal_thread(**kw)
 def create_m54_external(**kw):kw["standard"]="M54 Imaging / M54 x 0.75";return create_external_thread(**kw)
+def create_m95_internal(**kw):kw["standard"]="M95 Lens Retaining / M95 x 1";return create_internal_thread(**kw)
+def create_m95_external(**kw):kw["standard"]="M95 Lens Retaining / M95 x 1";return create_external_thread(**kw)
 
 
 def _show_dialog():
