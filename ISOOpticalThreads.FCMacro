@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
-"""ISO Optical Threads v0.4.2 for FreeCAD.
+"""ISO Optical Threads v0.4.3 for FreeCAD.
 
-v0.4.2
+v0.4.3
 ------
+* Adds an M95 x 2 coarse lens-retaining/test preset while keeping M95 x 1.
 * Keeps the Z=0 start convention introduced in v0.4.1.
-* Replaces the mathematical sharp V root with a tiny 0.01 x pitch root land on
-  BOTH male and female profiles. The root radius is recomputed so the 60-degree
-  flanks and selected pitch-diameter targets remain unchanged.
-* Keeps the male chamfer cutter visible even when automatic subtraction is used,
-  so its position/shape can be inspected directly.
+* Keeps the tiny 0.01 x pitch root land on BOTH male and female profiles.
+* Keeps the male chamfer cutter visible even when automatic subtraction is used.
 * ISO fit calculations, process compensation and separate chamfer cutters remain.
 
 This is an optical/FDM CAD profile experiment, not a structural bolt root and not
@@ -22,7 +20,7 @@ try:
 except Exception:
     Gui = None
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 TAN60 = math.sqrt(3.0)
 ROOT_FLAT_FACTOR = 0.01
 
@@ -34,6 +32,7 @@ THREAD_STANDARDS = {
     "M54 Imaging / M54 x 0.75": dict(diameter=54.0, pitch=0.75, application="Astronomy imaging"),
     "67mm Filter / M67 x 0.75": dict(diameter=67.0, pitch=0.75, application="Photography 67 mm filter"),
     "M95 Lens Retaining / M95 x 1": dict(diameter=95.0, pitch=1.0, application="Lens retaining"),
+    "M95 Coarse Test / M95 x 2": dict(diameter=95.0, pitch=2.0, application="Coarse lens retaining / print test"),
     "Custom metric": None,
 }
 FIT_OPTIONS = {
@@ -156,12 +155,6 @@ def _closed_profile(sk,pts):
     sk.addGeometry([Part.LineSegment(pts[i],pts[(i+1)%len(pts)]) for i in range(len(pts))],False)
 
 def _profile_geometry(tol,p,scale):
-    """Flank-anchored geometry with a tiny root flat.
-
-    Root flat removes the exact V singularity while preserving the selected pitch
-    radii and 60-degree flanks. Crest flat remains derived from the ISO major/minor
-    target and pitch radius.
-    """
     P=float(p);rf=max(1e-5,ROOT_FLAT_FACTOR*P)
     e_pitch=0.5*tol["external_pitch_target"]*scale;e_major=0.5*tol["external_major_target"]*scale
     i_pitch=0.5*tol["internal_pitch_target"]*scale;i_minor=0.5*tol["internal_minor_target"]*scale
@@ -169,8 +162,7 @@ def _profile_geometry(tol,p,scale):
     tiny=max(1e-5,1e-4*P);e_flat=max(tiny,min(0.45*P,e_flat));i_flat=max(tiny,min(0.45*P,i_flat))
     radial_to_root=TAN60*(P/4.0-rf/2.0)
     e_root=e_pitch-radial_to_root;i_root=i_pitch+radial_to_root
-    return dict(e_pitch=e_pitch,e_major=e_major,e_root=e_root,e_flat=e_flat,
-                i_pitch=i_pitch,i_minor=i_minor,i_root=i_root,i_flat=i_flat,root_flat=rf)
+    return dict(e_pitch=e_pitch,e_major=e_major,e_root=e_root,e_flat=e_flat,i_pitch=i_pitch,i_minor=i_minor,i_root=i_root,i_flat=i_flat,root_flat=rf)
 
 def _annular_cutter(rz_points,label):
     pts=[App.Vector(float(r),0.0,float(z)) for r,z in rz_points]
@@ -237,10 +229,7 @@ def _external(doc,desig,d,p,length,tol,proc,pct,scale,right=True,create_chamfer=
     L=float(length)*scale;P=float(p);g=_profile_geometry(tol,P,scale)
     major_r=g["e_major"];root_r=g["e_root"];flat=g["e_flat"];rf=g["root_flat"]
     if major_r<=root_r:raise ValueError("Invalid external profile")
-    z=0.5*P
-    # The structural core is exactly the root radius. Only the tiny rf gap between
-    # neighboring helical turns exposes it, creating the intended tiny root land.
-    core_r=root_r
+    z=0.5*P;core_r=root_r
     pts=[App.Vector(root_r,z-(P-rf)/2.0,0),App.Vector(major_r,z-flat/2.0,0),App.Vector(major_r,z+flat/2.0,0),App.Vector(root_r,z+(P-rf)/2.0,0)]
     b=doc.addObject("PartDesign::Body","ISOOpticalThread_External");b.Label="%s External ISO Optical v%s"%(desig,VERSION);_meta(b,desig,d,p,tol,proc,pct,scale,"External / male")
     _prop(b,"App::PropertyLength","ProfileCrestFlat","Profile experiment",flat);_prop(b,"App::PropertyLength","ProfileRootFlat","Profile experiment",rf);_prop(b,"App::PropertyLength","ProfileRootDiameter","Profile experiment",2.0*root_r);_prop(b,"App::PropertyLength","StructuralCoreDiameter","Profile experiment",2.0*core_r);_prop(b,"App::PropertyLength","ThreadProfileStartZ","Profile experiment",0.5*P)
@@ -327,7 +316,7 @@ def _show_dialog():
     dia.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None);pitch.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None);ip.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None);ep.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None)
     stdchg(std.currentText());procchg(proc.currentText());chamferchg();refresh_values(True)
     for lab,w in [("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Length:",length),("Wall thickness (female):",wall),("ISO fit / practical sense:",fit),("Internal pitch target D2:",ip),("External pitch target d2:",ep),("Functional pitch clearance:",clear),("ISO internal minor target:",imin),("ISO external major target:",emaj),("Internal pitch tolerance TD2:",td2i),("External pitch tolerance Td2:",td2e),("External fundamental deviation:",dev),("Tolerance calculation:",source),("Manufacturing process:",proc),("Process compensation:",comp),("Right hand:",right),("Create separate chamfer cutter:",make_ch),("Apply cutter automatically:",apply_ch),("Chamfer length:",chlen)]:lay.addRow(lab,w)
-    note=Q.QLabel("v0.4.2 experiment: Z=0 start is retained. Roots use a tiny 0.01 x pitch flat to avoid an exact BRep V singularity while preserving 60-degree flanks and pitch targets. The male chamfer cutter is deliberately kept visible even after automatic subtraction.")
+    note=Q.QLabel("v0.4.3: M95 x 2 coarse test preset added. All current profile rules remain pitch-relative: Z=0 start, 60-degree flanks, small crest flats, 0.01 x pitch root flats and the same chamfer/fitting logic.")
     try:note.setWordWrap(True)
     except Exception:pass
     lay.addRow(note);btn=Q.QDialogButtonBox(Q.QDialogButtonBox.Ok|Q.QDialogButtonBox.Cancel);btn.accepted.connect(dlg.accept);btn.rejected.connect(dlg.reject);lay.addRow(btn)
