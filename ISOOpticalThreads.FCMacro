@@ -40,6 +40,7 @@ THREAD_STANDARDS = {
     "T2 / M42 x 0.75": dict(diameter=42.0, pitch=0.75, application="T2 optical thread"),
     "2in Filter / M48 x 0.75": dict(diameter=48.0, pitch=0.75, application="Astronomy 2-inch filter"),
     "M54 Imaging / M54 x 0.75": dict(diameter=54.0, pitch=0.75, application="Astronomy imaging"),
+    "67mm Filter / M67 x 0.75": dict(diameter=67.0, pitch=0.75, application="Photography 67 mm filter"),
     "M95 Lens Retaining / M95 x 1": dict(diameter=95.0, pitch=1.0, application="Lens retaining"),
     "Custom metric": None,
 }
@@ -361,7 +362,8 @@ def _show_dialog():
     ]:
         lay.addRow(lab,w)
 
-    note=Q.QLabel("ISO baseline: ISO 68-1 / ISO 724 geometry; default ISO 965 6H internal / 6g external.\n"
+    note=Q.QLabel("ISO baseline: ISO 68-1 / ISO 724 geometry; default ISO 965 6H internal / 6g external.\
+"
                   "FDM/process compensation is separate from ISO tolerance.")
     try: note.setWordWrap(True)
     except Exception: pass
