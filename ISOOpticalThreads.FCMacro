@@ -1,22 +1,18 @@
 # -*- coding: utf-8 -*-
-"""ISO Optical Threads v0.4.1 for FreeCAD.
+"""ISO Optical Threads v0.4.2 for FreeCAD.
 
-Independent ISO-oriented optical thread macro. The original OpticalThreads.FCMacro
-is intentionally untouched.
+v0.4.2
+------
+* Keeps the Z=0 start convention introduced in v0.4.1.
+* Replaces the mathematical sharp V root with a tiny 0.01 x pitch root land on
+  BOTH male and female profiles. The root radius is recomputed so the 60-degree
+  flanks and selected pitch-diameter targets remain unchanged.
+* Keeps the male chamfer cutter visible even when automatic subtraction is used,
+  so its position/shape can be inspected directly.
+* ISO fit calculations, process compensation and separate chamfer cutters remain.
 
-v0.4.1 start-at-zero experiment
--------------------------------
-* Keeps the v0.4.0 flat crests, 60-degree flanks and sharp V roots.
-* Male and female thread construction now starts at Z=0; no negative-Z helper
-  geometry and no post-helix Z-range clipping operation are used.
-* The first periodic profile is centered at P/2, so the male profile spans
-  naturally from Z=0 to Z=P before advancing in +Z.
-* Core/sleeve/bore all start at Z=0. Chamfer cutters also start at Z=0 and smooth
-  the first thread directly.
-* ISO fit calculations and process compensation remain unchanged.
-
-This is an intentionally sharp-root optical/FDM profile experiment, not a structural
-bolt root and not a substitute for ISO 1502 inspection.
+This is an optical/FDM CAD profile experiment, not a structural bolt root and not
+a substitute for ISO 1502 inspection.
 """
 import math
 import FreeCAD as App
@@ -26,8 +22,9 @@ try:
 except Exception:
     Gui = None
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 TAN60 = math.sqrt(3.0)
+ROOT_FLAT_FACTOR = 0.01
 
 THREAD_STANDARDS = {
     "1.25in Filter / M28.5 x 0.6": dict(diameter=28.5, pitch=0.6, application="Astronomy 1.25-inch filter"),
@@ -156,25 +153,24 @@ def _check_shape(shape,label):
     if shape.isNull() or len(shape.Solids)!=1 or not shape.isValid():raise RuntimeError("%s produced an invalid solid"%label)
 
 def _closed_profile(sk,pts):
-    geo=[]
-    for i in range(len(pts)):geo.append(Part.LineSegment(pts[i],pts[(i+1)%len(pts)]))
-    sk.addGeometry(geo,False)
+    sk.addGeometry([Part.LineSegment(pts[i],pts[(i+1)%len(pts)]) for i in range(len(pts))],False)
 
-def _sharp_profile_geometry(tol,p,scale):
-    """Return flank-anchored sharp-root profile radii and crest flats."""
-    P=float(p)
-    e_pitch=0.5*tol["external_pitch_target"]*scale
-    e_major=0.5*tol["external_major_target"]*scale
-    i_pitch=0.5*tol["internal_pitch_target"]*scale
-    i_minor=0.5*tol["internal_minor_target"]*scale
-    e_flat=P/2.0-2.0*(e_major-e_pitch)/TAN60
-    i_flat=P/2.0-2.0*(i_pitch-i_minor)/TAN60
-    tiny=max(1e-5,1e-4*P)
-    e_flat=max(tiny,min(0.45*P,e_flat));i_flat=max(tiny,min(0.45*P,i_flat))
-    e_root=e_pitch-TAN60*P/4.0
-    i_root=i_pitch+TAN60*P/4.0
+def _profile_geometry(tol,p,scale):
+    """Flank-anchored geometry with a tiny root flat.
+
+    Root flat removes the exact V singularity while preserving the selected pitch
+    radii and 60-degree flanks. Crest flat remains derived from the ISO major/minor
+    target and pitch radius.
+    """
+    P=float(p);rf=max(1e-5,ROOT_FLAT_FACTOR*P)
+    e_pitch=0.5*tol["external_pitch_target"]*scale;e_major=0.5*tol["external_major_target"]*scale
+    i_pitch=0.5*tol["internal_pitch_target"]*scale;i_minor=0.5*tol["internal_minor_target"]*scale
+    e_flat=P/2.0-2.0*(e_major-e_pitch)/TAN60;i_flat=P/2.0-2.0*(i_pitch-i_minor)/TAN60
+    tiny=max(1e-5,1e-4*P);e_flat=max(tiny,min(0.45*P,e_flat));i_flat=max(tiny,min(0.45*P,i_flat))
+    radial_to_root=TAN60*(P/4.0-rf/2.0)
+    e_root=e_pitch-radial_to_root;i_root=i_pitch+radial_to_root
     return dict(e_pitch=e_pitch,e_major=e_major,e_root=e_root,e_flat=e_flat,
-                i_pitch=i_pitch,i_minor=i_minor,i_root=i_root,i_flat=i_flat)
+                i_pitch=i_pitch,i_minor=i_minor,i_root=i_root,i_flat=i_flat,root_flat=rf)
 
 def _annular_cutter(rz_points,label):
     pts=[App.Vector(float(r),0.0,float(z)) for r,z in rz_points]
@@ -186,9 +182,7 @@ def _annular_cutter(rz_points,label):
         edges.append(Part.makeLine(pts[i],pts[i+1]))
     wire=Part.Wire(edges)
     if not wire.isClosed():raise RuntimeError("%s cutter section is not closed"%label)
-    cutter=Part.Face(wire).revolve(App.Vector(0,0,0),App.Vector(0,0,1),360.0)
-    _check_shape(cutter,label+" cutter")
-    return cutter
+    cutter=Part.Face(wire).revolve(App.Vector(0,0,0),App.Vector(0,0,1),360.0);_check_shape(cutter,label+" cutter");return cutter
 
 def _make_chamfer_cutter(doc,name,label,shape,visible=True):
     obj=doc.addObject("PartDesign::Feature",name);obj.Label=label;obj.Shape=shape
@@ -198,84 +192,68 @@ def _make_chamfer_cutter(doc,name,label,shape,visible=True):
     return obj
 
 def _final_feature(doc,body,name,label,shape):
-    _check_shape(shape,label)
-    final=body.newObject("PartDesign::Feature",name);final.Label=label;final.Shape=shape
-    final.Placement=App.Placement(App.Vector(0,0,0),App.Rotation());body.Tip=final;doc.recompute()
-    return final
+    _check_shape(shape,label);final=body.newObject("PartDesign::Feature",name);final.Label=label;final.Shape=shape
+    final.Placement=App.Placement(App.Vector(0,0,0),App.Rotation());body.Tip=final;doc.recompute();return final
 
-def _apply_separate_cut(doc,body,cutter_obj,name,label):
+def _apply_separate_cut(doc,body,cutter_obj,name,label,keep_cutter_visible=False):
     before=body.Tip.Shape.copy();common=before.common(cutter_obj.Shape)
     if common.isNull() or float(common.Volume)<=1e-9:raise RuntimeError("%s cutter does not intersect the thread"%label)
     final=_final_feature(doc,body,name,label+" applied",before.cut(cutter_obj.Shape))
-    try:cutter_obj.ViewObject.Visibility=False
+    try:cutter_obj.ViewObject.Visibility=bool(keep_cutter_visible)
     except Exception:pass
     return final
 
 def _helix_height(L,P):
-    """Sweep one P-long start profile from Z=0..P and advance it only to Z=L."""
     L=float(L);P=float(P)
-    if L < P:
-        raise ValueError("Thread length must be at least one pitch for the Z=0 profile convention")
+    if L<P:raise ValueError("Thread length must be at least one pitch")
     return max(1e-6,L-P)
 
 def _internal(doc,desig,d,p,length,wall,tol,proc,pct,scale,right=True,create_chamfer=True,apply_chamfer=True,chamfer_pitch=1.0):
-    L=float(length)*scale;W=float(wall)*scale;P=float(p);g=_sharp_profile_geometry(tol,P,scale)
-    crest_r=g["i_minor"];root_r=g["i_root"];flat=g["i_flat"]
-    if root_r<=crest_r:raise ValueError("Invalid internal sharp-V profile")
+    L=float(length)*scale;W=float(wall)*scale;P=float(p);g=_profile_geometry(tol,P,scale)
+    crest_r=g["i_minor"];root_r=g["i_root"];flat=g["i_flat"];rf=g["root_flat"]
+    if root_r<=crest_r:raise ValueError("Invalid internal profile")
     outer_r=max(root_r+0.25,0.5*float(d)*scale+W)
     b=doc.addObject("PartDesign::Body","ISOOpticalThread_Internal");b.Label="%s Internal ISO Optical v%s"%(desig,VERSION);_meta(b,desig,d,p,tol,proc,pct,scale,"Internal / female")
-    _prop(b,"App::PropertyLength","ProfileCrestFlat","Profile experiment",flat);_prop(b,"App::PropertyLength","ProfileSharpVRootDiameter","Profile experiment",2.0*root_r)
-    _prop(b,"App::PropertyLength","ThreadProfileStartZ","Profile experiment",0.5*P)
+    _prop(b,"App::PropertyLength","ProfileCrestFlat","Profile experiment",flat);_prop(b,"App::PropertyLength","ProfileRootFlat","Profile experiment",rf);_prop(b,"App::PropertyLength","ProfileRootDiameter","Profile experiment",2.0*root_r);_prop(b,"App::PropertyLength","ThreadProfileStartZ","Profile experiment",0.5*P)
     outer=b.newObject("PartDesign::AdditiveCylinder","SleeveOuter");outer.Radius=outer_r;outer.Height=L;outer.Angle=360;doc.recompute()
-    bore=b.newObject("PartDesign::SubtractiveCylinder","ISO_Minor_Bore");bore.Radius=crest_r;bore.Height=L
-    bore.Placement=App.Placement(App.Vector(0,0,0),App.Rotation());doc.recompute();_check(bore,"Internal ISO bore")
-    groove_half=0.5*(P-flat);z=0.5*P
-    sk=b.newObject("Sketcher::SketchObject","ISO_ThreadProfile");sk.AttachmentSupport=b.Origin.OriginFeatures[4];sk.MapMode="FlatFace"
-    pts=[App.Vector(crest_r,z-groove_half,0),App.Vector(root_r,z,0),App.Vector(crest_r,z+groove_half,0)]
-    _closed_profile(sk,pts);doc.recompute()
-    hh=_helix_height(L,P)
-    h=b.newObject("PartDesign::SubtractiveHelix","ISO_ThreadHelix");h.Profile=sk;h.ReferenceAxis=(sk,["V_Axis"]);h.Mode=0
-    h.Pitch=P;h.Height=hh;h.Turns=h.Height.Value/P;h.Angle=0;h.Growth=0;h.LeftHanded=not bool(right);h.Reversed=0
+    bore=b.newObject("PartDesign::SubtractiveCylinder","ISO_Minor_Bore");bore.Radius=crest_r;bore.Height=L;bore.Placement=App.Placement(App.Vector(0,0,0),App.Rotation());doc.recompute();_check(bore,"Internal ISO bore")
+    z=0.5*P;groove_half=0.5*(P-flat)
+    pts=[App.Vector(crest_r,z-groove_half,0),App.Vector(root_r,z-rf/2.0,0),App.Vector(root_r,z+rf/2.0,0),App.Vector(crest_r,z+groove_half,0)]
+    sk=b.newObject("Sketcher::SketchObject","ISO_ThreadProfile");sk.AttachmentSupport=b.Origin.OriginFeatures[4];sk.MapMode="FlatFace";_closed_profile(sk,pts);doc.recompute()
+    hh=_helix_height(L,P);h=b.newObject("PartDesign::SubtractiveHelix","ISO_ThreadHelix");h.Profile=sk;h.ReferenceAxis=(sk,["V_Axis"]);h.Mode=0;h.Pitch=P;h.Height=hh;h.Turns=h.Height.Value/P;h.Angle=0;h.Growth=0;h.LeftHanded=not bool(right);h.Reversed=0
     doc.recompute();_check(h,"Internal ISO helix");b.Tip=h
     cutter_obj=None
     if create_chamfer:
         H=max(0.001,float(chamfer_pitch)*P);inner=crest_r-max(0.02,0.03*P);max_h=outer_r-0.10-inner
         if max_h<=0:raise RuntimeError("Female chamfer has no radial room")
-        H=min(H,max_h)
-        cutter=_annular_cutter([(inner,0.0),(inner+H,0.0),(inner,H)],"Female 45 degree lead-in")
+        H=min(H,max_h);cutter=_annular_cutter([(inner,0.0),(inner+H,0.0),(inner,H)],"Female 45 degree lead-in")
         cutter_obj=_make_chamfer_cutter(doc,"ISO_FemaleChamferCutter","Female 45 degree lead-in cutter",cutter,not apply_chamfer)
-        if apply_chamfer:_apply_separate_cut(doc,b,cutter_obj,"ISO_ThreadLeadIn","Female 45 degree lead-in")
+        if apply_chamfer:_apply_separate_cut(doc,b,cutter_obj,"ISO_ThreadLeadIn","Female 45 degree lead-in",False)
     try:outer.ViewObject.Visibility=False;bore.ViewObject.Visibility=False;sk.ViewObject.Visibility=False
     except Exception:pass
     doc.recompute();return b,cutter_obj
 
 def _external(doc,desig,d,p,length,tol,proc,pct,scale,right=True,create_chamfer=True,apply_chamfer=True,chamfer_pitch=1.0):
-    L=float(length)*scale;P=float(p);g=_sharp_profile_geometry(tol,P,scale)
-    major_r=g["e_major"];root_r=g["e_root"];flat=g["e_flat"]
-    if major_r<=root_r:raise ValueError("Invalid external sharp-V profile")
-    structural=max(0.02,0.03*P);core_r=root_r-structural
-    if core_r<=0:raise ValueError("External core radius is invalid")
-    z=0.5*P;halfP=0.5*P
-    pts=[App.Vector(core_r,z-halfP,0),App.Vector(root_r,z-halfP,0),
-         App.Vector(major_r,z-flat/2.0,0),App.Vector(major_r,z+flat/2.0,0),
-         App.Vector(root_r,z+halfP,0),App.Vector(core_r,z+halfP,0)]
+    L=float(length)*scale;P=float(p);g=_profile_geometry(tol,P,scale)
+    major_r=g["e_major"];root_r=g["e_root"];flat=g["e_flat"];rf=g["root_flat"]
+    if major_r<=root_r:raise ValueError("Invalid external profile")
+    z=0.5*P
+    # The structural core is exactly the root radius. Only the tiny rf gap between
+    # neighboring helical turns exposes it, creating the intended tiny root land.
+    core_r=root_r
+    pts=[App.Vector(root_r,z-(P-rf)/2.0,0),App.Vector(major_r,z-flat/2.0,0),App.Vector(major_r,z+flat/2.0,0),App.Vector(root_r,z+(P-rf)/2.0,0)]
     b=doc.addObject("PartDesign::Body","ISOOpticalThread_External");b.Label="%s External ISO Optical v%s"%(desig,VERSION);_meta(b,desig,d,p,tol,proc,pct,scale,"External / male")
-    _prop(b,"App::PropertyLength","ProfileCrestFlat","Profile experiment",flat);_prop(b,"App::PropertyLength","ProfileSharpVRootDiameter","Profile experiment",2.0*root_r);_prop(b,"App::PropertyLength","StructuralCoreDiameter","Profile experiment",2.0*core_r)
-    _prop(b,"App::PropertyLength","ThreadProfileStartZ","Profile experiment",0.5*P)
-    core=b.newObject("PartDesign::AdditiveCylinder","ISO_ThreadCore");core.Radius=core_r;core.Height=L
-    core.Placement=App.Placement(App.Vector(0,0,0),App.Rotation());doc.recompute();_check(core,"External structural core")
-    sk=b.newObject("Sketcher::SketchObject","ISO_ThreadProfile");sk.AttachmentSupport=b.Origin.OriginFeatures[4];sk.MapMode="FlatFace"
-    _closed_profile(sk,pts);doc.recompute()
-    hh=_helix_height(L,P)
-    h=b.newObject("PartDesign::AdditiveHelix","ISO_ThreadHelix");h.Profile=sk;h.ReferenceAxis=(sk,["V_Axis"]);h.Mode=0
-    h.Pitch=P;h.Height=hh;h.Turns=h.Height.Value/P;h.Angle=0;h.Growth=0;h.LeftHanded=not bool(right);h.Reversed=0
+    _prop(b,"App::PropertyLength","ProfileCrestFlat","Profile experiment",flat);_prop(b,"App::PropertyLength","ProfileRootFlat","Profile experiment",rf);_prop(b,"App::PropertyLength","ProfileRootDiameter","Profile experiment",2.0*root_r);_prop(b,"App::PropertyLength","StructuralCoreDiameter","Profile experiment",2.0*core_r);_prop(b,"App::PropertyLength","ThreadProfileStartZ","Profile experiment",0.5*P)
+    core=b.newObject("PartDesign::AdditiveCylinder","ISO_ThreadCore");core.Radius=core_r;core.Height=L;core.Placement=App.Placement(App.Vector(0,0,0),App.Rotation());doc.recompute();_check(core,"External structural core")
+    sk=b.newObject("Sketcher::SketchObject","ISO_ThreadProfile");sk.AttachmentSupport=b.Origin.OriginFeatures[4];sk.MapMode="FlatFace";_closed_profile(sk,pts);doc.recompute()
+    hh=_helix_height(L,P);h=b.newObject("PartDesign::AdditiveHelix","ISO_ThreadHelix");h.Profile=sk;h.ReferenceAxis=(sk,["V_Axis"]);h.Mode=0;h.Pitch=P;h.Height=hh;h.Turns=h.Height.Value/P;h.Angle=0;h.Growth=0;h.LeftHanded=not bool(right);h.Reversed=0
     doc.recompute();_check(h,"External ISO helix");b.Tip=h
     cutter_obj=None
     if create_chamfer:
         H=max(0.001,float(chamfer_pitch)*P);base=major_r-max(0.02,0.03*P);reduced=max(0.05,base-H);outer=major_r+max(0.10,0.20*P)
         cutter=_annular_cutter([(reduced,0.0),(outer,0.0),(outer,H),(base,H)],"Male 45 degree lead-in")
-        cutter_obj=_make_chamfer_cutter(doc,"ISO_MaleChamferCutter","Male 45 degree lead-in cutter",cutter,not apply_chamfer)
-        if apply_chamfer:_apply_separate_cut(doc,b,cutter_obj,"ISO_ThreadLeadIn","Male 45 degree lead-in")
+        cutter_obj=_make_chamfer_cutter(doc,"ISO_MaleChamferCutter","Male 45 degree lead-in cutter (kept visible)",cutter,True)
+        if apply_chamfer:_apply_separate_cut(doc,b,cutter_obj,"ISO_ThreadLeadIn","Male 45 degree lead-in",True)
     try:core.ViewObject.Visibility=False;sk.ViewObject.Visibility=False
     except Exception:pass
     doc.recompute();return b,cutter_obj
@@ -289,9 +267,7 @@ def create_external_thread(standard="T2 / M42 x 0.75",length=8.0,tolerance_pair=
     return _external(doc,desig,d,p,length,tol,proc,pct,scale,right_hand,create_chamfer,apply_chamfer,chamfer_pitch)
 
 def create_matched_pair(**kw):
-    doc=kw.pop("document",None) or App.ActiveDocument or App.newDocument("ISOOpticalThreads")
-    i=create_internal_thread(document=doc,**kw);ekw=dict(kw);ekw.pop("wall_thickness",None)
-    e=create_external_thread(document=doc,**ekw);doc.recompute();return i,e
+    doc=kw.pop("document",None) or App.ActiveDocument or App.newDocument("ISOOpticalThreads");i=create_internal_thread(document=doc,**kw);ekw=dict(kw);ekw.pop("wall_thickness",None);e=create_external_thread(document=doc,**ekw);doc.recompute();return i,e
 
 def _show_dialog():
     if Gui is None:return create_matched_pair()
@@ -351,7 +327,7 @@ def _show_dialog():
     dia.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None);pitch.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None);ip.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None);ep.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None)
     stdchg(std.currentText());procchg(proc.currentText());chamferchg();refresh_values(True)
     for lab,w in [("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Length:",length),("Wall thickness (female):",wall),("ISO fit / practical sense:",fit),("Internal pitch target D2:",ip),("External pitch target d2:",ep),("Functional pitch clearance:",clear),("ISO internal minor target:",imin),("ISO external major target:",emaj),("Internal pitch tolerance TD2:",td2i),("External pitch tolerance Td2:",td2e),("External fundamental deviation:",dev),("Tolerance calculation:",source),("Manufacturing process:",proc),("Process compensation:",comp),("Right hand:",right),("Create separate chamfer cutter:",make_ch),("Apply cutter automatically:",apply_ch),("Chamfer length:",chlen)]:lay.addRow(lab,w)
-    note=Q.QLabel("v0.4.1 experiment: male and female construction starts at Z=0. The first profile is centered at P/2, there is no negative-Z construction and no final Z clipping Boolean. Chamfer starts at Z=0 and smooths the first thread.")
+    note=Q.QLabel("v0.4.2 experiment: Z=0 start is retained. Roots use a tiny 0.01 x pitch flat to avoid an exact BRep V singularity while preserving 60-degree flanks and pitch targets. The male chamfer cutter is deliberately kept visible even after automatic subtraction.")
     try:note.setWordWrap(True)
     except Exception:pass
     lay.addRow(note);btn=Q.QDialogButtonBox(Q.QDialogButtonBox.Ok|Q.QDialogButtonBox.Cancel);btn.accepted.connect(dlg.accept);btn.rejected.connect(dlg.reject);lay.addRow(btn)
