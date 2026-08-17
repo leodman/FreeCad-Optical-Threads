@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""FreeCAD Optical Threads v0.5.7 - native male/female/matched metric threads.
+"""FreeCAD Optical Threads v0.5.8 - native male/female/matched metric threads.
 
-v0.5.7 adds common 60-degree optical/astronomy presets for M31x0.75,
-M48x0.75 and M54x0.75. Geometry behavior is unchanged from v0.5.6:
-nominal pitch stays locked, material/process defaults to No compensation (0%),
-3D PETG is 0.3%, all generated threads are centered on world X=0/Y=0, and
-male/female lead-ins use the same explicit annular cutter process.
+v0.5.8 makes fit allowances size dependent. Built-in thread standards carry an
+ISO-965-informed FDM reference fit normalized to the proven M42x0.75 macro
+values. Custom metric sizes linearly interpolate the reference fit from the two
+nearest built-in diameters, with a pitch correction. Pair diametral clearance is
+split equally between male and female instead of being applied only to the
+female. Nominal pitch remains locked and material/process compensation remains
+independent of fit.
 """
 import math
 import FreeCAD as App
@@ -16,20 +18,23 @@ except Exception:
     Gui=None
 
 THREAD_STANDARDS={
- "1.25in Filter / M28.5 x 0.6":dict(designation="1.25in Filter / M28.5 x 0.6",diameter=28.5,pitch=0.6,profile_angle=60.0,family="Astronomy 1.25-inch filter/eyepiece metric thread",verified=True),
- "Helical focuser / M31 x 0.75":dict(designation="Helical focuser / M31 x 0.75",diameter=31.0,pitch=0.75,profile_angle=60.0,family="Optical/astronomy metric 60 degree profile",verified=True),
- "T2 / M42 x 0.75":dict(designation="T2 / M42 x 0.75",diameter=42.0,pitch=0.75,profile_angle=60.0,family="ISO metric 60 degree profile",verified=True),
- "2in Filter / M48 x 0.75":dict(designation="2in Filter / M48 x 0.75",diameter=48.0,pitch=0.75,profile_angle=60.0,family="Astronomy 2-inch filter metric thread",verified=True),
- "M54 Imaging / M54 x 0.75":dict(designation="M54 Imaging / M54 x 0.75",diameter=54.0,pitch=0.75,profile_angle=60.0,family="Astronomy imaging metric thread",verified=True),
- "M95 Lens Retaining / M95 x 1":dict(designation="M95 Lens Retaining / M95 x 1",diameter=95.0,pitch=1.0,profile_angle=60.0,family="Optical lens retaining metric 60 degree profile",verified=True),
+ "1.25in Filter / M28.5 x 0.6":dict(designation="1.25in Filter / M28.5 x 0.6",diameter=28.5,pitch=0.6,profile_angle=60.0,family="Astronomy 1.25-inch filter/eyepiece metric thread",verified=True,fit_reference=dict(diametral_clearance=0.176,root_relief=0.088,crest_truncation=0.044)),
+ "Helical focuser / M31 x 0.75":dict(designation="Helical focuser / M31 x 0.75",diameter=31.0,pitch=0.75,profile_angle=60.0,family="Optical/astronomy metric 60 degree profile",verified=True,fit_reference=dict(diametral_clearance=0.194,root_relief=0.097,crest_truncation=0.049)),
+ "T2 / M42 x 0.75":dict(designation="T2 / M42 x 0.75",diameter=42.0,pitch=0.75,profile_angle=60.0,family="ISO metric 60 degree profile",verified=True,fit_reference=dict(diametral_clearance=0.200,root_relief=0.100,crest_truncation=0.050)),
+ "2in Filter / M48 x 0.75":dict(designation="2in Filter / M48 x 0.75",diameter=48.0,pitch=0.75,profile_angle=60.0,family="Astronomy 2-inch filter metric thread",verified=True,fit_reference=dict(diametral_clearance=0.203,root_relief=0.101,crest_truncation=0.051)),
+ "M54 Imaging / M54 x 0.75":dict(designation="M54 Imaging / M54 x 0.75",diameter=54.0,pitch=0.75,profile_angle=60.0,family="Astronomy imaging metric thread",verified=True,fit_reference=dict(diametral_clearance=0.205,root_relief=0.103,crest_truncation=0.051)),
+ "M95 Lens Retaining / M95 x 1":dict(designation="M95 Lens Retaining / M95 x 1",diameter=95.0,pitch=1.0,profile_angle=60.0,family="Optical lens retaining metric 60 degree profile",verified=True,fit_reference=dict(diametral_clearance=0.244,root_relief=0.122,crest_truncation=0.061)),
  "Custom metric":None,
 }
+
+# Multipliers are applied to the selected standard's fit_reference.  At M42x0.75
+# these reproduce the v0.5.7 values exactly.
 FIT_PRESETS={
- "Basic / nominal":dict(diametral_clearance=0.00,root_relief=0.00,crest_truncation=0.00),
- "Close":dict(diametral_clearance=0.05,root_relief=0.00,crest_truncation=0.00),
- "Normal":dict(diametral_clearance=0.10,root_relief=0.00,crest_truncation=0.00),
- "Loose":dict(diametral_clearance=0.20,root_relief=0.05,crest_truncation=0.025),
- "FDM print":dict(diametral_clearance=0.20,root_relief=0.10,crest_truncation=0.05),
+ "Basic / nominal":dict(clearance_factor=0.00,root_factor=0.00,crest_factor=0.00),
+ "Close":dict(clearance_factor=0.25,root_factor=0.00,crest_factor=0.00),
+ "Normal":dict(clearance_factor=0.50,root_factor=0.00,crest_factor=0.00),
+ "Loose":dict(clearance_factor=1.00,root_factor=0.50,crest_factor=0.50),
+ "FDM print":dict(clearance_factor=1.00,root_factor=1.00,crest_factor=1.00),
  "Custom":None,
 }
 MATERIAL_PROCESS_PRESETS={"No compensation":0.0,"3D PETG":0.3,"Custom compensation":None}
@@ -44,21 +49,73 @@ def _prop(o,t,n,g,v):
     except Exception:pass
 
 
+def _built_in_fit_rows():
+    rows=[]
+    for s in THREAD_STANDARDS.values():
+        if s is not None and "fit_reference" in s:
+            rows.append((float(s["diameter"]),float(s["pitch"]),dict(s["fit_reference"])))
+    return sorted(rows,key=lambda x:x[0])
+
+
+def _lerp(a,b,t):
+    return float(a)+(float(b)-float(a))*float(t)
+
+
+def _interpolated_fit_reference(d,p):
+    """Linear diameter interpolation from the two nearest built-in macro rows.
+
+    A gentle pitch correction keeps a custom pitch from inheriting a reference
+    calibrated at a substantially different pitch. Outside the built-in range,
+    the nearest two rows are used for linear extrapolation.
+    """
+    d,p=float(d),float(p)
+    rows=_built_in_fit_rows()
+    if len(rows)<2:
+        return dict(diametral_clearance=0.20,root_relief=0.10,crest_truncation=0.05),"fallback"
+    if d<=rows[0][0]:lo,hi=rows[0],rows[1]
+    elif d>=rows[-1][0]:lo,hi=rows[-2],rows[-1]
+    else:
+        lo,hi=rows[0],rows[-1]
+        for i in range(len(rows)-1):
+            if rows[i][0]<=d<=rows[i+1][0]:lo,hi=rows[i],rows[i+1];break
+    span=hi[0]-lo[0]
+    t=0.0 if abs(span)<1e-12 else (d-lo[0])/span
+    ref={k:_lerp(lo[2][k],hi[2][k],t) for k in ("diametral_clearance","root_relief","crest_truncation")}
+    p_ref=_lerp(lo[1],hi[1],t)
+    # ISO metric tolerance magnitudes change sub-linearly with pitch; this is a
+    # best-fit correction for custom optical sizes, not a claim of an ISO table row.
+    if p_ref>0 and p>0:
+        pitch_factor=(p/p_ref)**0.4
+        ref={k:max(0.0,v*pitch_factor) for k,v in ref.items()}
+    src="linear interpolation M%gx%g <-> M%gx%g"%(lo[0],lo[1],hi[0],hi[1])
+    return ref,src
+
+
 def _std(name,d=None,p=None):
     if name not in THREAD_STANDARDS: raise ValueError("Unknown thread standard: %s"%name)
     s=THREAD_STANDARDS[name]
-    if s is not None:return dict(s)
+    if s is not None:
+        v=dict(s);v["fit_reference"]=dict(s["fit_reference"]);v["fit_reference_source"]="built-in ISO-965-informed macro reference";return v
     if d is None or p is None:raise ValueError("Custom metric requires diameter and pitch")
     d,p=float(d),float(p)
     if d<=0 or p<=0:raise ValueError("Custom diameter and pitch must be > 0")
-    return dict(designation="M%gx%g custom"%(d,p),diameter=d,pitch=p,profile_angle=60.0,family="Custom metric 60 degree profile",verified=False)
+    ref,src=_interpolated_fit_reference(d,p)
+    return dict(designation="M%gx%g custom"%(d,p),diameter=d,pitch=p,profile_angle=60.0,family="Custom metric 60 degree profile",verified=False,fit_reference=ref,fit_reference_source=src)
 
 
-def _fit(name,c=None,r=None,k=None):
+def _fit(name,s,c=None,r=None,k=None):
     if name not in FIT_PRESETS:name="FDM print"
     v=FIT_PRESETS[name]
-    if v is not None:return name,dict(v)
-    return name,dict(diametral_clearance=0.20 if c is None else float(c),root_relief=0.10 if r is None else float(r),crest_truncation=0.05 if k is None else float(k))
+    if v is None:
+        fv=dict(diametral_clearance=0.20 if c is None else float(c),root_relief=0.10 if r is None else float(r),crest_truncation=0.05 if k is None else float(k))
+        return name,fv,"custom literal values"
+    ref=s["fit_reference"]
+    fv=dict(
+        diametral_clearance=float(ref["diametral_clearance"])*float(v["clearance_factor"]),
+        root_relief=float(ref["root_relief"])*float(v["root_factor"]),
+        crest_truncation=float(ref["crest_truncation"])*float(v["crest_factor"]),
+    )
+    return name,fv,s.get("fit_reference_source","built-in reference")
 
 
 def _material(name,sh=None):
@@ -75,8 +132,8 @@ def _material(name,sh=None):
 
 
 def _resolve(standard,fit,material,shrink,d,p,c,r,k):
-    s=_std(standard,d,p); fn,fv=_fit(fit,c,r,k); mn,sh,sc=_material(material,shrink)
-    return s,fn,fv,mn,sh,sc
+    s=_std(standard,d,p); fn,fv,fsrc=_fit(fit,s,c,r,k); mn,sh,sc=_material(material,shrink)
+    return s,fn,fv,fsrc,mn,sh,sc
 
 
 def _check(f,label):
@@ -89,13 +146,19 @@ def _check_shape(shape,label):
         raise RuntimeError("%s produced an invalid solid"%label)
 
 
-def _meta(body,s,g,fit,mat,sh,sc,kind):
+def _meta(body,s,g,fit,fv,fsrc,mat,sh,sc,kind):
     _prop(body,"App::PropertyString","ThreadDesignation","Thread",s["designation"])
     _prop(body,"App::PropertyString","ThreadKind","Thread",kind)
     _prop(body,"App::PropertyLength","NominalDiameter","Thread",g["nominal_diameter"])
     _prop(body,"App::PropertyLength","NominalPitch","Thread",g["nominal_pitch"])
     _prop(body,"App::PropertyLength","CADPitch","Thread",g["cad_pitch"])
     _prop(body,"App::PropertyString","FitPreset","Fit",fit)
+    _prop(body,"App::PropertyString","FitReferenceSource","Fit",fsrc)
+    _prop(body,"App::PropertyLength","PairDiametralClearance","Fit",fv["diametral_clearance"])
+    _prop(body,"App::PropertyLength","FemaleRootRelief","Fit",fv["root_relief"])
+    _prop(body,"App::PropertyLength","FemaleCrestTruncation","Fit",fv["crest_truncation"])
+    _prop(body,"App::PropertyLength","MaleDiametralAllowance","Fit",0.5*fv["diametral_clearance"])
+    _prop(body,"App::PropertyLength","FemaleDiametralAllowance","Fit",0.5*fv["diametral_clearance"])
     _prop(body,"App::PropertyString","MaterialProcess","Print compensation",mat)
     _prop(body,"App::PropertyFloat","ShrinkagePercent","Print compensation",sh)
     _prop(body,"App::PropertyFloat","CompensationScale","Print compensation",sc)
@@ -105,8 +168,10 @@ def _igeom(s,f,sc,length,wall):
     d0,p0=float(s["diameter"]),float(s["pitch"]); L=float(length); W=float(wall)
     if min(d0,p0,L,W)<=0:raise ValueError("Diameter, pitch, length and wall must be > 0")
     d=d0*sc; p=p0; L=L*sc; W=W*sc
-    c=f["diametral_clearance"]*sc; rr=f["root_relief"]*sc; ct=f["crest_truncation"]*sc
-    crest=d-1.082531754*p+c+2*ct; root=d+c+2*rr
+    pair_c=f["diametral_clearance"]*sc
+    female_c=0.5*pair_c
+    rr=f["root_relief"]*sc; ct=f["crest_truncation"]*sc
+    crest=d-1.082531754*p+female_c+2*ct; root=d+female_c+2*rr
     rc,rrad=crest/2,root/2; ro=d/2+W; depth=rrad-rc
     if depth<=0 or ro<=rrad+0.1:raise ValueError("Invalid internal geometry")
     return dict(nominal_diameter=d0,nominal_pitch=p0,cad_pitch=p,body_length=L,r_crest=rc,r_root=rrad,r_outer=ro,thread_depth=depth,half_width=depth*math.tan(math.radians(30)))
@@ -115,7 +180,9 @@ def _igeom(s,f,sc,length,wall):
 def _egeom(s,f,sc,length,wall):
     d0,p0=float(s["diameter"]),float(s["pitch"]); L=float(length); W=float(wall)
     if min(d0,p0,L,W)<=0:raise ValueError("Diameter, pitch, length and wall must be > 0")
-    d=d0*sc; p=p0; L=L*sc
+    pair_c=f["diametral_clearance"]*sc
+    male_c=0.5*pair_c
+    d=d0*sc-male_c; p=p0; L=L*sc
     rm=d/2; rr=(d-1.226869*p)/2; depth=rm-rr
     if depth<=0:raise ValueError("Invalid external geometry")
     return dict(nominal_diameter=d0,nominal_pitch=p0,cad_pitch=p,body_length=L,r_major=rm,r_root=rr,thread_depth=depth,half_width=depth*math.tan(math.radians(30)))
@@ -176,11 +243,11 @@ def _lead_in_cut(doc,body,name,rz_points,label):
     return final
 
 
-def _internal(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
+def _internal(doc,s,g,fit,fv,fsrc,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
     b=doc.addObject("PartDesign::Body","OpticalThread_Internal")
-    b.Label="%s Internal Thread v0.5.7"%s["designation"]
+    b.Label="%s Internal Thread v0.5.8"%s["designation"]
     b.Placement=App.Placement(App.Vector(0,0,0),App.Rotation())
-    _meta(b,s,g,fit,mat,sh,sc,"Internal / female")
+    _meta(b,s,g,fit,fv,fsrc,mat,sh,sc,"Internal / female")
     outer=b.newObject("PartDesign::AdditiveCylinder","SleeveOuter"); outer.Radius=g["r_outer"]; outer.Height=g["body_length"]; outer.Angle=360; doc.recompute()
     eps=max(0.03,0.04*g["cad_pitch"])
     bore=b.newObject("PartDesign::SubtractiveCylinder","SleeveBore"); bore.Radius=g["r_crest"]; bore.Height=g["body_length"]+2*eps; bore.Angle=360; bore.Placement=App.Placement(App.Vector(0,0,-eps),App.Rotation()); doc.recompute(); _check(bore,"Internal bore")
@@ -201,11 +268,11 @@ def _internal(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
     b.Tip=tip; b.Placement.Base.x=0; b.Placement.Base.y=0; doc.recompute(); return b
 
 
-def _external(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
+def _external(doc,s,g,fit,fv,fsrc,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
     b=doc.addObject("PartDesign::Body","OpticalThread_External")
-    b.Label="%s External Thread v0.5.7"%s["designation"]
+    b.Label="%s External Thread v0.5.8"%s["designation"]
     b.Placement=App.Placement(App.Vector(0,0,0),App.Rotation())
-    _meta(b,s,g,fit,mat,sh,sc,"External / male")
+    _meta(b,s,g,fit,fv,fsrc,mat,sh,sc,"External / male")
     p=g["cad_pitch"]; z=-p; overlap=max(0.01*sc,0.015); rb=g["r_root"]-overlap
     sk=b.newObject("Sketcher::SketchObject","ThreadProfile"); sk.AttachmentSupport=b.Origin.OriginFeatures[4]; sk.MapMode="FlatFace"
     a=App.Vector(rb,z-g["half_width"],0); c=App.Vector(g["r_major"],z,0); d=App.Vector(rb,z+g["half_width"],0)
@@ -230,14 +297,14 @@ def _external(doc,s,g,fit,mat,sh,sc,right=True,lead=True,lead_pitch=1.0):
 
 def create_internal_thread(standard="T2 / M42 x 0.75",length=8.0,wall_thickness=3.0,fit="FDM print",material_process="No compensation",shrinkage_percent=None,custom_diameter=None,custom_pitch=None,custom_clearance=None,root_relief=None,crest_truncation=None,right_hand=True,lead_in=True,lead_in_pitch=1.0,document=None):
     doc=document or App.ActiveDocument or App.newDocument("OpticalThreads")
-    s,fn,fv,mn,sh,sc=_resolve(standard,fit,material_process,shrinkage_percent,custom_diameter,custom_pitch,custom_clearance,root_relief,crest_truncation)
-    return _internal(doc,s,_igeom(s,fv,sc,length,wall_thickness),fn,mn,sh,sc,right_hand,lead_in,lead_in_pitch)
+    s,fn,fv,fsrc,mn,sh,sc=_resolve(standard,fit,material_process,shrinkage_percent,custom_diameter,custom_pitch,custom_clearance,root_relief,crest_truncation)
+    return _internal(doc,s,_igeom(s,fv,sc,length,wall_thickness),fn,fv,fsrc,mn,sh,sc,right_hand,lead_in,lead_in_pitch)
 
 
 def create_external_thread(standard="T2 / M42 x 0.75",length=8.0,wall_thickness=3.0,fit="FDM print",material_process="No compensation",shrinkage_percent=None,custom_diameter=None,custom_pitch=None,custom_clearance=None,root_relief=None,crest_truncation=None,right_hand=True,lead_in=True,lead_in_pitch=1.0,document=None):
     doc=document or App.ActiveDocument or App.newDocument("OpticalThreads")
-    s,fn,fv,mn,sh,sc=_resolve(standard,fit,material_process,shrinkage_percent,custom_diameter,custom_pitch,custom_clearance,root_relief,crest_truncation)
-    return _external(doc,s,_egeom(s,fv,sc,length,wall_thickness),fn,mn,sh,sc,right_hand,lead_in,lead_in_pitch)
+    s,fn,fv,fsrc,mn,sh,sc=_resolve(standard,fit,material_process,shrinkage_percent,custom_diameter,custom_pitch,custom_clearance,root_relief,crest_truncation)
+    return _external(doc,s,_egeom(s,fv,sc,length,wall_thickness),fn,fv,fsrc,mn,sh,sc,right_hand,lead_in,lead_in_pitch)
 
 
 def create_matched_pair(**kw):
@@ -269,7 +336,7 @@ def _show_dialog():
         from PySide import QtGui; Q=QtGui
     except Exception:
         from PySide2 import QtWidgets as Q
-    dlg=Q.QDialog();dlg.setWindowTitle("FreeCAD Optical Threads v0.5.7");lay=Q.QFormLayout(dlg)
+    dlg=Q.QDialog();dlg.setWindowTitle("FreeCAD Optical Threads v0.5.8");lay=Q.QFormLayout(dlg)
     out=Q.QComboBox();[out.addItem(x) for x in OUTPUT_MODES];out.setCurrentText("Matched pair")
     std=Q.QComboBox();[std.addItem(x) for x in THREAD_STANDARDS];std.setCurrentText("T2 / M42 x 0.75")
     dia=Q.QDoubleSpinBox();dia.setRange(1,500);dia.setDecimals(3);dia.setValue(42);dia.setSuffix(" mm")
@@ -279,27 +346,45 @@ def _show_dialog():
     fit=Q.QComboBox();[fit.addItem(x) for x in FIT_PRESETS];fit.setCurrentText("FDM print")
     mat=Q.QComboBox();[mat.addItem(x) for x in MATERIAL_PROCESS_PRESETS];mat.setCurrentText("No compensation")
     shrink=Q.QDoubleSpinBox();shrink.setRange(0,20);shrink.setDecimals(3);shrink.setSingleStep(.1);shrink.setValue(0.0);shrink.setSuffix(" %")
-    clear=Q.QDoubleSpinBox();clear.setRange(-.5,2);clear.setDecimals(3);clear.setValue(.2);clear.setSuffix(" mm dia")
-    root=Q.QDoubleSpinBox();root.setRange(0,1);root.setDecimals(3);root.setValue(.1);root.setSuffix(" mm radial")
-    crest=Q.QDoubleSpinBox();crest.setRange(0,.5);crest.setDecimals(3);crest.setValue(.05);crest.setSuffix(" mm radial")
+    clear=Q.QDoubleSpinBox();clear.setRange(-.5,5);clear.setDecimals(3);clear.setValue(.2);clear.setSuffix(" mm total dia")
+    root=Q.QDoubleSpinBox();root.setRange(0,2);root.setDecimals(3);root.setValue(.1);root.setSuffix(" mm radial")
+    crest=Q.QDoubleSpinBox();crest.setRange(0,1);crest.setDecimals(3);crest.setValue(.05);crest.setSuffix(" mm radial")
+    source=Q.QLabel("")
     lead=Q.QCheckBox();lead.setChecked(True)
     lp=Q.QDoubleSpinBox();lp.setRange(.25,3);lp.setSingleStep(.25);lp.setValue(1);lp.setSuffix(" x pitch")
+
+    def selected_standard():
+        n=str(std.currentText())
+        return _std(n,dia.value(),pitch.value()) if n=="Custom metric" else _std(n)
+
+    def update_fit_display():
+        try:
+            s=selected_standard();n=str(fit.currentText())
+            if n!="Custom":
+                _,v,src=_fit(n,s);clear.setValue(v["diametral_clearance"]);root.setValue(v["root_relief"]);crest.setValue(v["crest_truncation"]);source.setText(src)
+            else:
+                source.setText("custom literal values")
+        except Exception as exc:
+            source.setText(str(exc))
+
     def stdchg(n):
         n=str(n); custom=n=="Custom metric";dia.setEnabled(custom);pitch.setEnabled(custom)
         if not custom:dia.setValue(THREAD_STANDARDS[n]["diameter"]);pitch.setValue(THREAD_STANDARDS[n]["pitch"])
+        update_fit_display()
     def fitchg(n):
-        n=str(n);custom=n=="Custom";clear.setEnabled(custom);root.setEnabled(custom);crest.setEnabled(custom)
-        if not custom:
-            v=FIT_PRESETS[n];clear.setValue(v["diametral_clearance"]);root.setValue(v["root_relief"]);crest.setValue(v["crest_truncation"])
+        n=str(n);custom=n=="Custom";clear.setEnabled(custom);root.setEnabled(custom);crest.setEnabled(custom);update_fit_display()
     def matchg(n):
         n=str(n);v=MATERIAL_PROCESS_PRESETS.get(n)
         custom=n=="Custom compensation"
         shrink.setEnabled(custom)
         if not custom:shrink.setValue(float(v))
+
     std.currentTextChanged.connect(stdchg);fit.currentTextChanged.connect(fitchg);mat.currentTextChanged.connect(matchg)
+    dia.valueChanged.connect(lambda _v:update_fit_display() if str(std.currentText())=="Custom metric" else None)
+    pitch.valueChanged.connect(lambda _v:update_fit_display() if str(std.currentText())=="Custom metric" else None)
     stdchg(std.currentText());fitchg(fit.currentText());matchg(mat.currentText())
-    for lab,w in [("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Length:",length),("Wall thickness (female):",wall),("Fit:",fit),("Material / process:",mat),("Shrinkage / compression:",shrink),("Pair diametral clearance:",clear),("Female root relief:",root),("Female crest truncation:",crest),("Thread lead-in chamfer:",lead),("Lead-in length:",lp)]:lay.addRow(lab,w)
-    lay.addRow(Q.QLabel("v0.5.7: adds M31x0.75, M48x0.75 and M54x0.75 presets; geometry unchanged."))
+    for lab,w in [("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Length:",length),("Wall thickness (female):",wall),("Fit:",fit),("Material / process:",mat),("Shrinkage / compression:",shrink),("Pair diametral clearance:",clear),("Female root relief:",root),("Female crest truncation:",crest),("Fit reference:",source),("Thread lead-in chamfer:",lead),("Lead-in length:",lp)]:lay.addRow(lab,w)
+    lay.addRow(Q.QLabel("v0.5.8: size/pitch-dependent fit; custom sizes interpolate nearest macro standards; pair clearance split male/female."))
     btn=Q.QDialogButtonBox(Q.QDialogButtonBox.Ok|Q.QDialogButtonBox.Cancel);btn.accepted.connect(dlg.accept);btn.rejected.connect(dlg.reject);lay.addRow(btn)
     if not (dlg.exec() if hasattr(dlg,"exec") else dlg.exec_()):return None
     st,ft,om=str(std.currentText()),str(fit.currentText()),str(out.currentText())
