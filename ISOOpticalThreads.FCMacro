@@ -3,7 +3,7 @@
 
 v0.4.3
 ------
-* Adds an M95 x 2 coarse lens-retaining/test preset while keeping M95 x 1.
+* Adds an M95 x 2 lens-retaining preset while keeping M95 x 1.
 * Keeps the Z=0 start convention introduced in v0.4.1.
 * Keeps the tiny 0.01 x pitch root land on BOTH male and female profiles.
 * Keeps the male chamfer cutter visible even when automatic subtraction is used.
@@ -32,7 +32,7 @@ THREAD_STANDARDS = {
     "M54 Imaging / M54 x 0.75": dict(diameter=54.0, pitch=0.75, application="Astronomy imaging"),
     "67mm Filter / M67 x 0.75": dict(diameter=67.0, pitch=0.75, application="Photography 67 mm filter"),
     "M95 Lens Retaining / M95 x 1": dict(diameter=95.0, pitch=1.0, application="Lens retaining"),
-    "M95 Coarse Test / M95 x 2": dict(diameter=95.0, pitch=2.0, application="Coarse lens retaining / print test"),
+    "M95 Lens Retaining / M95 x 2": dict(diameter=95.0, pitch=2.0, application="Lens retaining"),
     "Custom metric": None,
 }
 FIT_OPTIONS = {
@@ -316,7 +316,7 @@ def _show_dialog():
     dia.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None);pitch.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None);ip.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None);ep.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None)
     stdchg(std.currentText());procchg(proc.currentText());chamferchg();refresh_values(True)
     for lab,w in [("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Length:",length),("Wall thickness (female):",wall),("ISO fit / practical sense:",fit),("Internal pitch target D2:",ip),("External pitch target d2:",ep),("Functional pitch clearance:",clear),("ISO internal minor target:",imin),("ISO external major target:",emaj),("Internal pitch tolerance TD2:",td2i),("External pitch tolerance Td2:",td2e),("External fundamental deviation:",dev),("Tolerance calculation:",source),("Manufacturing process:",proc),("Process compensation:",comp),("Right hand:",right),("Create separate chamfer cutter:",make_ch),("Apply cutter automatically:",apply_ch),("Chamfer length:",chlen)]:lay.addRow(lab,w)
-    note=Q.QLabel("v0.4.3: M95 x 2 coarse test preset added. All current profile rules remain pitch-relative: Z=0 start, 60-degree flanks, small crest flats, 0.01 x pitch root flats and the same chamfer/fitting logic.")
+    note=Q.QLabel("v0.4.3: M95 x 2 lens-retaining profile added alongside M95 x 1. All current profile rules remain pitch-relative: Z=0 start, 60-degree flanks, small crest flats, 0.01 x pitch root flats and the same chamfer/fitting logic.")
     try:note.setWordWrap(True)
     except Exception:pass
     lay.addRow(note);btn=Q.QDialogButtonBox(Q.QDialogButtonBox.Ok|Q.QDialogButtonBox.Cancel);btn.accepted.connect(dlg.accept);btn.rejected.connect(dlg.reject);lay.addRow(btn)
