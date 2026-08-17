@@ -1,22 +1,21 @@
 # -*- coding: utf-8 -*-
-"""ISO Optical Threads v0.3.1 for FreeCAD.
+"""ISO Optical Threads v0.4.0 for FreeCAD.
 
 Independent ISO-oriented optical thread macro. The original OpticalThreads.FCMacro
 is intentionally untouched.
 
-v0.3.1
-------
-* Keeps the corrected 60-degree male/female thread geometry and ISO fit options.
-* Keeps live ISO target/tolerance values plus "Custom from selected ISO fit".
-* Keeps separate revolved annular chamfer cutters; automatic subtraction is optional.
-* Enforces the FINISHED male and female solids to Z=0 .. requested length. Helices
-  may overrun internally for robust construction, then are clipped to the work range.
-* Male and female chamfer length both use the requested x-pitch value. The male
-  chamfer is no longer limited to the thread radial depth.
-* Manufacturing/process compensation remains separate from ISO tolerance.
+v0.4.0 profile experiment
+-------------------------
+* 60-degree flanks remain anchored to the selected pitch-diameter tolerance targets.
+* Male crest keeps a small flat; adjacent flanks continue to a sharp V root.
+* Female crest keeps a small flat; the groove continues to a sharp V root.
+* The male core cylinder sits below the V root and is only structural; it must not
+  become the visible valley floor.
+* ISO fit calculations, process compensation, Z=0..Length clipping and separate
+  chamfer cutters are retained.
 
-The generated BRep is a CAD construction for optical parts; it is not a substitute
-for inspection with ISO 1502 gauges.
+This is an intentionally sharp-root optical/FDM profile experiment, not a structural
+bolt root and not a substitute for ISO 1502 inspection.
 """
 import math
 import FreeCAD as App
@@ -26,7 +25,8 @@ try:
 except Exception:
     Gui = None
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
+TAN60 = math.sqrt(3.0)
 
 THREAD_STANDARDS = {
     "1.25in Filter / M28.5 x 0.6": dict(diameter=28.5, pitch=0.6, application="Astronomy 1.25-inch filter"),
@@ -38,7 +38,6 @@ THREAD_STANDARDS = {
     "M95 Lens Retaining / M95 x 1": dict(diameter=95.0, pitch=1.0, application="Lens retaining"),
     "Custom metric": None,
 }
-
 FIT_OPTIONS = {
     "ISO 6H / 6g - Standard (close)": dict(internal="6H", external="6g", label="Standard / close"),
     "ISO 7H / 6g - Relaxed": dict(internal="7H", external="6g", label="Relaxed"),
@@ -49,160 +48,94 @@ FIT_OPTIONS = {
     "ISO basic profile - no tolerance offset": dict(internal="basic", external="basic", label="Basic profile"),
 }
 CUSTOM_FIT = "Custom from selected ISO fit"
-
-PROCESS_PRESETS = {
-    "No process compensation": 0.0,
-    "FDM PETG": 0.3,
-    "Custom compensation": None,
-}
+PROCESS_PRESETS = {"No process compensation":0.0, "FDM PETG":0.3, "Custom compensation":None}
 OUTPUT_MODES = ("Internal / female", "External / male", "Matched pair")
 
-_G_ES_UM = {
-    0.20:-17,0.25:-18,0.30:-18,0.35:-19,0.40:-19,0.45:-20,0.50:-20,
-    0.60:-21,0.70:-22,0.75:-22,0.80:-24,1.00:-26,1.25:-28,1.50:-32,
-    1.75:-34,2.00:-38,2.50:-42,3.00:-48,3.50:-53,4.00:-60,4.50:-63,
-    5.00:-71,5.50:-75,6.00:-80,8.00:-100,
-}
-_TD1_6_UM = {
-    0.30:85,0.35:100,0.40:112,0.45:125,0.50:140,0.60:160,0.70:180,
-    0.75:190,0.80:200,1.00:236,1.25:265,1.50:300,1.75:335,2.00:375,
-    2.50:450,3.00:500,3.50:560,4.00:600,4.50:670,5.00:710,5.50:750,
-    6.00:800,8.00:1000,
-}
-_TD_6_UM = {
-    0.20:56,0.25:67,0.30:75,0.35:85,0.40:95,0.45:100,0.50:106,
-    0.60:125,0.70:140,0.75:140,0.80:150,1.00:180,1.25:212,1.50:236,
-    1.75:265,2.00:280,2.50:335,3.00:375,3.50:425,4.00:475,4.50:500,
-    5.00:530,5.50:560,6.00:600,8.00:710,
-}
+_G_ES_UM = {0.20:-17,0.25:-18,0.30:-18,0.35:-19,0.40:-19,0.45:-20,0.50:-20,0.60:-21,0.70:-22,0.75:-22,0.80:-24,1.00:-26,1.25:-28,1.50:-32,1.75:-34,2.00:-38,2.50:-42,3.00:-48,3.50:-53,4.00:-60,4.50:-63,5.00:-71,5.50:-75,6.00:-80,8.00:-100}
+_TD1_6_UM = {0.30:85,0.35:100,0.40:112,0.45:125,0.50:140,0.60:160,0.70:180,0.75:190,0.80:200,1.00:236,1.25:265,1.50:300,1.75:335,2.00:375,2.50:450,3.00:500,3.50:560,4.00:600,4.50:670,5.00:710,5.50:750,6.00:800,8.00:1000}
+_TD_6_UM = {0.20:56,0.25:67,0.30:75,0.35:85,0.40:95,0.45:100,0.50:106,0.60:125,0.70:140,0.75:140,0.80:150,1.00:180,1.25:212,1.50:236,1.75:265,2.00:280,2.50:335,3.00:375,3.50:425,4.00:475,4.50:500,5.00:530,5.50:560,6.00:600,8.00:710}
 _GRADE_FACTOR = {6:1.0, 7:1.25}
-
 
 def _interp_table(table,x):
     x=float(x); keys=sorted(table)
-    if x in table: return float(table[x]), "table row"
-    if x <= keys[0]: lo,hi=keys[0],keys[1]
-    elif x >= keys[-1]: lo,hi=keys[-2],keys[-1]
+    if x in table:return float(table[x]),"table row"
+    if x<=keys[0]:lo,hi=keys[0],keys[1]
+    elif x>=keys[-1]:lo,hi=keys[-2],keys[-1]
     else:
         for lo,hi in zip(keys[:-1],keys[1:]):
-            if lo <= x <= hi: break
+            if lo<=x<=hi:break
     t=(x-lo)/(hi-lo)
-    return table[lo]+(table[hi]-table[lo])*t, "linear interpolation of adjacent pitch rows"
-
+    return table[lo]+(table[hi]-table[lo])*t,"linear interpolation of adjacent pitch rows"
 
 def _external_es_mm(position,p):
     p=float(p)
-    if position=="h": return 0.0,"h: zero fundamental deviation"
+    if position=="h":return 0.0,"h: zero fundamental deviation"
     if position=="g":
-        um,src=_interp_table(_G_ES_UM,p); return um/1000.0,"g: %s"%src
-    if position=="f": return -(30.0+11.0*p)/1000.0,"f: ISO-965 formula model"
-    if position=="e": return -(50.0+11.0*p)/1000.0,"e: ISO-965 formula model"
+        um,src=_interp_table(_G_ES_UM,p);return um/1000.0,"g: %s"%src
+    if position=="f":return -(30.0+11.0*p)/1000.0,"f: ISO-965 formula model"
+    if position=="e":return -(50.0+11.0*p)/1000.0,"e: ISO-965 formula model"
     raise ValueError("Unsupported external tolerance position: %s"%position)
 
-
 def _td1_grade_mm(p,grade):
-    um,src=_interp_table(_TD1_6_UM,p)
-    return (um/1000.0)*_GRADE_FACTOR.get(int(grade),1.0),src
-
+    um,src=_interp_table(_TD1_6_UM,p);return (um/1000.0)*_GRADE_FACTOR.get(int(grade),1.0),src
 
 def _td_grade_mm(p,grade):
-    um,src=_interp_table(_TD_6_UM,p)
-    return (um/1000.0)*_GRADE_FACTOR.get(int(grade),1.0),src
-
+    um,src=_interp_table(_TD_6_UM,p);return (um/1000.0)*_GRADE_FACTOR.get(int(grade),1.0),src
 
 def _td2_grade_special_mm(d,p,grade):
-    base=(90.0*(float(p)**0.4)*(float(d)**0.1))/1000.0
-    return base*_GRADE_FACTOR.get(int(grade),1.0)
+    return ((90.0*(float(p)**0.4)*(float(d)**0.1))/1000.0)*_GRADE_FACTOR.get(int(grade),1.0)
 
-
-def _TD2_grade_special_mm(d,p,grade):
-    return 1.32*_td2_grade_special_mm(d,p,grade)
-
+def _TD2_grade_special_mm(d,p,grade):return 1.32*_td2_grade_special_mm(d,p,grade)
 
 def _basic(d,p):
-    d=float(d); p=float(p)
-    H=math.sqrt(3.0)*0.5*p
-    return dict(D=d,d=d,D2=d-0.649519053*p,d2=d-0.649519053*p,
-                D1=d-1.082531755*p,d3=d-1.226869322*p,H=H,pitch=p)
-
+    d=float(d);p=float(p);H=math.sqrt(3.0)*0.5*p
+    return dict(D=d,d=d,D2=d-0.649519053*p,d2=d-0.649519053*p,D1=d-1.082531755*p,d3=d-1.226869322*p,H=H,pitch=p)
 
 def _parse_class(cls):
-    if cls=="basic": return None,None
+    if cls=="basic":return None,None
     return int(cls[:-1]),cls[-1]
-
 
 def _tol(d,p,fit_name,custom_internal_pitch=None,custom_external_pitch=None,base_fit_name=None):
     b=_basic(d,p)
     if fit_name==CUSTOM_FIT:
-        if base_fit_name not in FIT_OPTIONS: base_fit_name="ISO 6H / 6g - Standard (close)"
+        if base_fit_name not in FIT_OPTIONS:base_fit_name="ISO 6H / 6g - Standard (close)"
         base=_tol(d,p,base_fit_name)
         ip=base["internal_pitch_target"] if custom_internal_pitch is None else float(custom_internal_pitch)
         ep=base["external_pitch_target"] if custom_external_pitch is None else float(custom_external_pitch)
         out=dict(base)
-        out.update(pair=CUSTOM_FIT,practical_label="Custom from %s"%base_fit_name,
-                   internal_pitch_target=ip,external_pitch_target=ep,
-                   internal_pitch_offset=ip-b["D2"],external_pitch_offset=ep-b["d2"],
-                   source="manual pitch-diameter targets initialized from %s"%base_fit_name,
-                   base_fit_name=base_fit_name)
+        out.update(pair=CUSTOM_FIT,practical_label="Custom from %s"%base_fit_name,internal_pitch_target=ip,external_pitch_target=ep,internal_pitch_offset=ip-b["D2"],external_pitch_offset=ep-b["d2"],source="manual pitch-diameter targets initialized from %s"%base_fit_name,base_fit_name=base_fit_name)
         out["internal_minor_target"]=b["D1"]+out["internal_pitch_offset"]
         out["internal_major_target"]=b["D"]+out["internal_pitch_offset"]
         out["external_major_target"]=b["d"]+out["external_pitch_offset"]
         out["external_root_target"]=b["d3"]+out["external_pitch_offset"]
         out["functional_pitch_clearance"]=ip-ep
         return out
-
-    if fit_name not in FIT_OPTIONS: fit_name="ISO 6H / 6g - Standard (close)"
-    spec=FIT_OPTIONS[fit_name]; icls=spec["internal"]; ecls=spec["external"]
+    if fit_name not in FIT_OPTIONS:fit_name="ISO 6H / 6g - Standard (close)"
+    spec=FIT_OPTIONS[fit_name];icls=spec["internal"];ecls=spec["external"]
     if icls=="basic" and ecls=="basic":
-        return dict(pair=fit_name,practical_label=spec["label"],internal_class="basic",external_class="basic",
-                    internal_pitch_target=b["D2"],external_pitch_target=b["d2"],
-                    internal_minor_target=b["D1"],internal_major_target=b["D"],
-                    external_major_target=b["d"],external_root_target=b["d3"],
-                    internal_pitch_offset=0.0,external_pitch_offset=0.0,functional_pitch_clearance=0.0,
-                    EI=0.0,es=0.0,TD2=0.0,Td2=0.0,TD1=0.0,Td=0.0,
-                    source="ISO 68-1 / ISO 724 basic profile; no tolerance-zone offset",
-                    base_fit_name=fit_name)
-
-    igrade,ipos=_parse_class(icls); egrade,epos=_parse_class(ecls)
-    if ipos!="H": raise ValueError("This macro currently supports internal H classes")
-    TD2=_TD2_grade_special_mm(d,p,igrade); TD1,td1_src=_td1_grade_mm(p,igrade)
-    internal_pitch_target=b["D2"]+0.5*TD2
-    internal_pitch_offset=internal_pitch_target-b["D2"]
-    es,es_src=_external_es_mm(epos,p)
-    Td2=_td2_grade_special_mm(d,p,egrade); Td,td_src=_td_grade_mm(p,egrade)
-    external_pitch_target=b["d2"]+es-0.5*Td2
-    external_pitch_offset=external_pitch_target-b["d2"]
-    return dict(pair=fit_name,practical_label=spec["label"],internal_class=icls,external_class=ecls,
-                internal_pitch_target=internal_pitch_target,external_pitch_target=external_pitch_target,
-                internal_minor_target=b["D1"]+internal_pitch_offset,
-                internal_major_target=b["D"]+internal_pitch_offset,
-                external_major_target=b["d"]+external_pitch_offset,
-                external_root_target=b["d3"]+external_pitch_offset,
-                internal_pitch_offset=internal_pitch_offset,external_pitch_offset=external_pitch_offset,
-                functional_pitch_clearance=internal_pitch_target-external_pitch_target,
-                EI=0.0,es=es,TD2=TD2,Td2=Td2,TD1=TD1,Td=Td,
-                source=("ISO 965 class model %s/%s; internal H midpoint; external %s; "
-                        "special-pitch grade model; crest rows %s/%s")%(icls,ecls,es_src,td1_src,td_src),
-                base_fit_name=fit_name)
-
+        return dict(pair=fit_name,practical_label=spec["label"],internal_class="basic",external_class="basic",internal_pitch_target=b["D2"],external_pitch_target=b["d2"],internal_minor_target=b["D1"],internal_major_target=b["D"],external_major_target=b["d"],external_root_target=b["d3"],internal_pitch_offset=0.0,external_pitch_offset=0.0,functional_pitch_clearance=0.0,EI=0.0,es=0.0,TD2=0.0,Td2=0.0,TD1=0.0,Td=0.0,source="ISO 68-1 / ISO 724 basic profile; no tolerance-zone offset",base_fit_name=fit_name)
+    igrade,ipos=_parse_class(icls);egrade,epos=_parse_class(ecls)
+    if ipos!="H":raise ValueError("This macro currently supports internal H classes")
+    TD2=_TD2_grade_special_mm(d,p,igrade);TD1,td1_src=_td1_grade_mm(p,igrade)
+    ip=b["D2"]+0.5*TD2;io=ip-b["D2"]
+    es,es_src=_external_es_mm(epos,p);Td2=_td2_grade_special_mm(d,p,egrade);Td,td_src=_td_grade_mm(p,egrade)
+    ep=b["d2"]+es-0.5*Td2;eo=ep-b["d2"]
+    return dict(pair=fit_name,practical_label=spec["label"],internal_class=icls,external_class=ecls,internal_pitch_target=ip,external_pitch_target=ep,internal_minor_target=b["D1"]+io,internal_major_target=b["D"]+io,external_major_target=b["d"]+eo,external_root_target=b["d3"]+eo,internal_pitch_offset=io,external_pitch_offset=eo,functional_pitch_clearance=ip-ep,EI=0.0,es=es,TD2=TD2,Td2=Td2,TD1=TD1,Td=Td,source=("ISO 965 class model %s/%s; internal H midpoint; external %s; special-pitch grade model; crest rows %s/%s")%(icls,ecls,es_src,td1_src,td_src),base_fit_name=fit_name)
 
 def _process(name,custom=None):
-    if name not in PROCESS_PRESETS: name="No process compensation"
-    v=PROCESS_PRESETS[name]
-    pct=float(custom if v is None and custom is not None else (0.0 if v is None else v))
-    if pct<0.0 or pct>=100.0: raise ValueError("Process compensation must be >=0 and <100 percent")
+    if name not in PROCESS_PRESETS:name="No process compensation"
+    v=PROCESS_PRESETS[name];pct=float(custom if v is None and custom is not None else (0.0 if v is None else v))
+    if pct<0.0 or pct>=100.0:raise ValueError("Process compensation must be >=0 and <100 percent")
     return name,pct,1.0/(1.0-pct/100.0)
 
-
 def _standard(name,d=None,p=None):
-    if name not in THREAD_STANDARDS: raise ValueError("Unknown thread standard")
+    if name not in THREAD_STANDARDS:raise ValueError("Unknown thread standard")
     row=THREAD_STANDARDS[name]
-    if row is not None: return name,float(row["diameter"]),float(row["pitch"]),row["application"],True
-    if d is None or p is None: raise ValueError("Custom metric requires diameter and pitch")
-    d=float(d); p=float(p)
-    if d<=0 or p<=0: raise ValueError("Diameter and pitch must be >0")
+    if row is not None:return name,float(row["diameter"]),float(row["pitch"]),row["application"],True
+    if d is None or p is None:raise ValueError("Custom metric requires diameter and pitch")
+    d=float(d);p=float(p)
+    if d<=0 or p<=0:raise ValueError("Diameter and pitch must be >0")
     return "M%gx%g custom"%(d,p),d,p,"Custom optical metric thread",False
-
 
 def _prop(o,t,n,g,v):
     try:o.addProperty(t,n,g)
@@ -211,315 +144,208 @@ def _prop(o,t,n,g,v):
     try:o.setEditorMode(n,1)
     except Exception:pass
 
-
 def _meta(body,desig,d,p,tol,proc,pct,scale,kind):
-    vals=[
-        ("App::PropertyString","ThreadDesignation","ISO Thread",desig),
-        ("App::PropertyString","ThreadKind","ISO Thread",kind),
-        ("App::PropertyLength","NominalDiameter","ISO Thread",d),
-        ("App::PropertyLength","NominalPitch","ISO Thread",p),
-        ("App::PropertyString","TolerancePair","ISO Tolerance",tol["pair"]),
-        ("App::PropertyString","PracticalFitLabel","ISO Tolerance",tol.get("practical_label","")),
-        ("App::PropertyString","ToleranceSource","ISO Tolerance",tol["source"]),
-        ("App::PropertyLength","InternalPitchDiameterTarget","ISO Tolerance",tol["internal_pitch_target"]),
-        ("App::PropertyLength","ExternalPitchDiameterTarget","ISO Tolerance",tol["external_pitch_target"]),
-        ("App::PropertyLength","InternalMinorDiameterTarget","ISO Tolerance",tol["internal_minor_target"]),
-        ("App::PropertyLength","ExternalMajorDiameterTarget","ISO Tolerance",tol["external_major_target"]),
-        ("App::PropertyLength","FunctionalPitchClearance","ISO Tolerance",tol.get("functional_pitch_clearance",0.0)),
-        ("App::PropertyLength","InternalPitchDiameterTolerance","ISO Tolerance",tol.get("TD2",0.0)),
-        ("App::PropertyLength","ExternalPitchDiameterTolerance","ISO Tolerance",tol.get("Td2",0.0)),
-        ("App::PropertyLength","ExternalFundamentalDeviation","ISO Tolerance",tol.get("es",0.0)),
-        ("App::PropertyString","ManufacturingProcess","Process compensation",proc),
-        ("App::PropertyFloat","CompensationPercent","Process compensation",pct),
-        ("App::PropertyFloat","CompensationScale","Process compensation",scale),
-    ]
+    vals=[("App::PropertyString","ThreadDesignation","ISO Thread",desig),("App::PropertyString","ThreadKind","ISO Thread",kind),("App::PropertyLength","NominalDiameter","ISO Thread",d),("App::PropertyLength","NominalPitch","ISO Thread",p),("App::PropertyString","TolerancePair","ISO Tolerance",tol["pair"]),("App::PropertyString","PracticalFitLabel","ISO Tolerance",tol.get("practical_label","")),("App::PropertyString","ToleranceSource","ISO Tolerance",tol["source"]),("App::PropertyLength","InternalPitchDiameterTarget","ISO Tolerance",tol["internal_pitch_target"]),("App::PropertyLength","ExternalPitchDiameterTarget","ISO Tolerance",tol["external_pitch_target"]),("App::PropertyLength","InternalMinorDiameterTarget","ISO Tolerance",tol["internal_minor_target"]),("App::PropertyLength","ExternalMajorDiameterTarget","ISO Tolerance",tol["external_major_target"]),("App::PropertyLength","FunctionalPitchClearance","ISO Tolerance",tol.get("functional_pitch_clearance",0.0)),("App::PropertyLength","InternalPitchDiameterTolerance","ISO Tolerance",tol.get("TD2",0.0)),("App::PropertyLength","ExternalPitchDiameterTolerance","ISO Tolerance",tol.get("Td2",0.0)),("App::PropertyLength","ExternalFundamentalDeviation","ISO Tolerance",tol.get("es",0.0)),("App::PropertyString","ManufacturingProcess","Process compensation",proc),("App::PropertyFloat","CompensationPercent","Process compensation",pct),("App::PropertyFloat","CompensationScale","Process compensation",scale)]
     for args in vals:_prop(body,*args)
 
-
 def _check(obj,label):
-    if obj.Shape.isNull() or len(obj.Shape.Solids)!=1 or not obj.Shape.isValid():
-        raise RuntimeError("%s produced an invalid solid"%label)
-
+    if obj.Shape.isNull() or len(obj.Shape.Solids)!=1 or not obj.Shape.isValid():raise RuntimeError("%s produced an invalid solid"%label)
 
 def _check_shape(shape,label):
-    if shape.isNull() or len(shape.Solids)!=1 or not shape.isValid():
-        raise RuntimeError("%s produced an invalid solid"%label)
+    if shape.isNull() or len(shape.Solids)!=1 or not shape.isValid():raise RuntimeError("%s produced an invalid solid"%label)
 
+def _closed_profile(sk,pts):
+    geo=[]
+    for i in range(len(pts)):geo.append(Part.LineSegment(pts[i],pts[(i+1)%len(pts)]))
+    sk.addGeometry(geo,False)
 
-def _profile_triangle(inner_r,outer_r,z):
-    r0=float(inner_r); r1=float(outer_r); depth=abs(r1-r0)
-    if depth<=1e-9: raise ValueError("Thread profile has zero radial depth")
-    half=depth*math.tan(math.radians(30.0))
-    return App.Vector(r0,z-half,0),App.Vector(r1,z,0),App.Vector(r0,z+half,0),half
+def _sharp_profile_geometry(tol,p,scale):
+    """Return flank-anchored sharp-root profile radii and crest flats.
 
+    Pitch targets remain exactly those from _tol(). The external major and internal
+    minor targets determine the crest truncations. The root is then extended until
+    neighboring 60-degree flanks meet at a V at +/- P/2.
+    """
+    P=float(p)
+    e_pitch=0.5*tol["external_pitch_target"]*scale
+    e_major=0.5*tol["external_major_target"]*scale
+    i_pitch=0.5*tol["internal_pitch_target"]*scale
+    i_minor=0.5*tol["internal_minor_target"]*scale
+    e_flat=P/2.0-2.0*(e_major-e_pitch)/TAN60
+    i_flat=P/2.0-2.0*(i_pitch-i_minor)/TAN60
+    tiny=max(1e-5,1e-4*P)
+    e_flat=max(tiny,min(0.45*P,e_flat));i_flat=max(tiny,min(0.45*P,i_flat))
+    e_root=e_pitch-TAN60*P/4.0
+    i_root=i_pitch+TAN60*P/4.0
+    return dict(e_pitch=e_pitch,e_major=e_major,e_root=e_root,e_flat=e_flat,
+                i_pitch=i_pitch,i_minor=i_minor,i_root=i_root,i_flat=i_flat)
 
 def _annular_cutter(rz_points,label):
-    """Robust 360-degree revolved cutter; avoids the old toroid/chamfer failure."""
     pts=[App.Vector(float(r),0.0,float(z)) for r,z in rz_points]
-    if len(pts)<3: raise ValueError("%s requires at least three section points"%label)
-    if (pts[0]-pts[-1]).Length>1e-12: pts.append(pts[0])
+    if len(pts)<3:raise ValueError("%s requires at least three section points"%label)
+    if (pts[0]-pts[-1]).Length>1e-12:pts.append(pts[0])
     edges=[]
     for i in range(len(pts)-1):
-        if (pts[i+1]-pts[i]).Length<=1e-12: raise RuntimeError("%s has a zero-length cutter edge"%label)
+        if (pts[i+1]-pts[i]).Length<=1e-12:raise RuntimeError("%s has a zero-length cutter edge"%label)
         edges.append(Part.makeLine(pts[i],pts[i+1]))
     wire=Part.Wire(edges)
-    if not wire.isClosed(): raise RuntimeError("%s cutter section is not closed"%label)
-    cutter=Part.Face(wire).revolve(App.Vector(0,0,0),App.Vector(0,0,1),360.0)
-    _check_shape(cutter,label+" cutter")
-    return cutter
-
+    if not wire.isClosed():raise RuntimeError("%s cutter section is not closed"%label)
+    cutter=Part.Face(wire).revolve(App.Vector(0,0,0),App.Vector(0,0,1),360.0);_check_shape(cutter,label+" cutter");return cutter
 
 def _make_chamfer_cutter(doc,name,label,shape,visible=True):
-    obj=doc.addObject("PartDesign::Feature",name); obj.Label=label; obj.Shape=shape
-    obj.Placement=App.Placement(App.Vector(0,0,0),App.Rotation())
+    obj=doc.addObject("PartDesign::Feature",name);obj.Label=label;obj.Shape=shape;obj.Placement=App.Placement(App.Vector(0,0,0),App.Rotation())
     try:obj.ViewObject.Visibility=bool(visible)
     except Exception:pass
     return obj
 
-
 def _final_feature(doc,body,name,label,shape):
-    _check_shape(shape,label)
-    final=body.newObject("PartDesign::Feature",name); final.Label=label; final.Shape=shape
-    final.Placement=App.Placement(App.Vector(0,0,0),App.Rotation()); body.Tip=final
-    doc.recompute(); return final
-
+    _check_shape(shape,label);final=body.newObject("PartDesign::Feature",name);final.Label=label;final.Shape=shape;final.Placement=App.Placement(App.Vector(0,0,0),App.Rotation());body.Tip=final;doc.recompute();return final
 
 def _trim_to_work_range(doc,body,radius,length,name):
-    """Clip construction overrun so the finished solid is exactly Z=0..length."""
-    L=float(length)
-    if L<=0: raise ValueError("Thread length must be >0")
-    envelope=Part.makeCylinder(float(radius),L,App.Vector(0,0,0),App.Vector(0,0,1))
-    result=body.Tip.Shape.copy().common(envelope)
-    final=_final_feature(doc,body,name,"Finished thread Z=0..%.6g mm"%L,result)
-    bb=final.Shape.BoundBox
-    tol=1e-6
-    if abs(bb.ZMin)>tol or abs(bb.ZMax-L)>max(tol,1e-7*L):
-        raise RuntimeError("Finished thread Z range is %.9g..%.9g, expected 0..%.9g"%(bb.ZMin,bb.ZMax,L))
+    L=float(length);envelope=Part.makeCylinder(float(radius),L,App.Vector(0,0,0),App.Vector(0,0,1));result=body.Tip.Shape.copy().common(envelope)
+    final=_final_feature(doc,body,name,"Finished thread Z=0..%.6g mm"%L,result);bb=final.Shape.BoundBox;tol=1e-6
+    if abs(bb.ZMin)>tol or abs(bb.ZMax-L)>max(tol,1e-7*L):raise RuntimeError("Finished thread Z range is %.9g..%.9g, expected 0..%.9g"%(bb.ZMin,bb.ZMax,L))
     return final
 
-
 def _apply_separate_cut(doc,body,cutter_obj,name,label):
-    before=body.Tip.Shape.copy(); common=before.common(cutter_obj.Shape)
-    if common.isNull() or float(common.Volume)<=1e-9: raise RuntimeError("%s cutter does not intersect the thread"%label)
+    before=body.Tip.Shape.copy();common=before.common(cutter_obj.Shape)
+    if common.isNull() or float(common.Volume)<=1e-9:raise RuntimeError("%s cutter does not intersect the thread"%label)
     final=_final_feature(doc,body,name,label+" applied",before.cut(cutter_obj.Shape))
     try:cutter_obj.ViewObject.Visibility=False
     except Exception:pass
     return final
 
-
-def _internal(doc,desig,d,p,length,wall,tol,proc,pct,scale,right=True,
-              create_chamfer=True,apply_chamfer=True,chamfer_pitch=1.0):
-    L=float(length)*scale; W=float(wall)*scale; P=float(p)
-    minor_r=0.5*tol["internal_minor_target"]*scale; major_r=0.5*tol["internal_major_target"]*scale
-    if major_r-minor_r<=0: raise ValueError("Invalid internal ISO profile depth")
-    outer_r=max(major_r+0.25,0.5*float(d)*scale+W)
-    b=doc.addObject("PartDesign::Body","ISOOpticalThread_Internal"); b.Label="%s Internal ISO Optical v%s"%(desig,VERSION)
-    _meta(b,desig,d,p,tol,proc,pct,scale,"Internal / female")
-
-    outer=b.newObject("PartDesign::AdditiveCylinder","SleeveOuter"); outer.Radius=outer_r; outer.Height=L; outer.Angle=360
-    doc.recompute()
-    eps=max(0.03,0.04*P)
-    bore=b.newObject("PartDesign::SubtractiveCylinder","ISO_Minor_Bore"); bore.Radius=minor_r; bore.Height=L+2*eps
-    bore.Placement=App.Placement(App.Vector(0,0,-eps),App.Rotation()); doc.recompute(); _check(bore,"Internal ISO bore")
-    sk=b.newObject("Sketcher::SketchObject","ISO_ThreadProfile"); sk.AttachmentSupport=b.Origin.OriginFeatures[4]; sk.MapMode="FlatFace"
-    a,c,q,half=_profile_triangle(minor_r,major_r,-P); sk.addGeometry([Part.LineSegment(a,c),Part.LineSegment(c,q),Part.LineSegment(q,a)],False)
-    doc.recompute()
-    h=b.newObject("PartDesign::SubtractiveHelix","ISO_ThreadHelix"); h.Profile=sk; h.ReferenceAxis=(sk,["V_Axis"]); h.Mode=0
-    h.Pitch=P; h.Height=L+2*P; h.Turns=h.Height.Value/P; h.Angle=0; h.Growth=0; h.LeftHanded=not bool(right); h.Reversed=0
-    doc.recompute(); _check(h,"Internal ISO helix"); b.Tip=h
-    _trim_to_work_range(doc,b,outer_r+max(0.1,0.2*P),L,"ISO_ZRangeTrim")
-
+def _internal(doc,desig,d,p,length,wall,tol,proc,pct,scale,right=True,create_chamfer=True,apply_chamfer=True,chamfer_pitch=1.0):
+    L=float(length)*scale;W=float(wall)*scale;P=float(p);g=_sharp_profile_geometry(tol,P,scale)
+    crest_r=g["i_minor"];root_r=g["i_root"];flat=g["i_flat"]
+    if root_r<=crest_r:raise ValueError("Invalid internal sharp-V profile")
+    outer_r=max(root_r+0.25,0.5*float(d)*scale+W)
+    b=doc.addObject("PartDesign::Body","ISOOpticalThread_Internal");b.Label="%s Internal ISO Optical v%s"%(desig,VERSION);_meta(b,desig,d,p,tol,proc,pct,scale,"Internal / female")
+    _prop(b,"App::PropertyLength","ProfileCrestFlat","Profile experiment",flat);_prop(b,"App::PropertyLength","ProfileSharpVRootDiameter","Profile experiment",2.0*root_r)
+    outer=b.newObject("PartDesign::AdditiveCylinder","SleeveOuter");outer.Radius=outer_r;outer.Height=L;outer.Angle=360;doc.recompute()
+    eps=max(0.03,0.04*P);bore=b.newObject("PartDesign::SubtractiveCylinder","ISO_Minor_Bore");bore.Radius=crest_r;bore.Height=L+2*eps;bore.Placement=App.Placement(App.Vector(0,0,-eps),App.Rotation());doc.recompute();_check(bore,"Internal ISO bore")
+    # Groove base leaves exactly 'flat' of female crest between adjacent turns.
+    groove_half=0.5*(P-flat);z=-P
+    sk=b.newObject("Sketcher::SketchObject","ISO_ThreadProfile");sk.AttachmentSupport=b.Origin.OriginFeatures[4];sk.MapMode="FlatFace"
+    pts=[App.Vector(crest_r,z-groove_half,0),App.Vector(root_r,z,0),App.Vector(crest_r,z+groove_half,0)]
+    _closed_profile(sk,pts);doc.recompute()
+    h=b.newObject("PartDesign::SubtractiveHelix","ISO_ThreadHelix");h.Profile=sk;h.ReferenceAxis=(sk,["V_Axis"]);h.Mode=0;h.Pitch=P;h.Height=L+2*P;h.Turns=h.Height.Value/P;h.Angle=0;h.Growth=0;h.LeftHanded=not bool(right);h.Reversed=0
+    doc.recompute();_check(h,"Internal ISO helix");b.Tip=h;_trim_to_work_range(doc,b,outer_r+max(0.1,0.2*P),L,"ISO_ZRangeTrim")
     cutter_obj=None
     if create_chamfer:
-        H=max(0.001,float(chamfer_pitch)*P)
-        inner=minor_r-max(0.02,0.03*P)
-        max_h=outer_r-0.10-inner
-        if max_h<=0: raise RuntimeError("Female chamfer has no radial room")
-        H=min(H,max_h)
-        cutter=_annular_cutter([(inner,0.0),(inner+H,0.0),(inner,H)],"Female 45 degree lead-in")
-        cutter_obj=_make_chamfer_cutter(doc,"ISO_FemaleChamferCutter","Female 45 degree lead-in cutter",cutter,not apply_chamfer)
+        H=max(0.001,float(chamfer_pitch)*P);inner=crest_r-max(0.02,0.03*P);max_h=outer_r-0.10-inner
+        if max_h<=0:raise RuntimeError("Female chamfer has no radial room")
+        H=min(H,max_h);cutter=_annular_cutter([(inner,0.0),(inner+H,0.0),(inner,H)],"Female 45 degree lead-in");cutter_obj=_make_chamfer_cutter(doc,"ISO_FemaleChamferCutter","Female 45 degree lead-in cutter",cutter,not apply_chamfer)
         if apply_chamfer:_apply_separate_cut(doc,b,cutter_obj,"ISO_ThreadLeadIn","Female 45 degree lead-in")
-
-    try:outer.ViewObject.Visibility=False; bore.ViewObject.Visibility=False; sk.ViewObject.Visibility=False
+    try:outer.ViewObject.Visibility=False;bore.ViewObject.Visibility=False;sk.ViewObject.Visibility=False
     except Exception:pass
-    doc.recompute(); return b,cutter_obj
+    doc.recompute();return b,cutter_obj
 
-
-def _external(doc,desig,d,p,length,tol,proc,pct,scale,right=True,
-              create_chamfer=True,apply_chamfer=True,chamfer_pitch=1.0):
-    L=float(length)*scale; P=float(p)
-    major_r=0.5*tol["external_major_target"]*scale; root_r=0.5*tol["external_root_target"]*scale
-    if major_r-root_r<=0: raise ValueError("Invalid external ISO profile depth")
-    overlap=max(0.010*scale,0.01)
-    a,c,q,half=_profile_triangle(root_r-overlap,major_r,-P)
-    margin=half+max(0.015,0.02*P); start=-P-margin
-    b=doc.addObject("PartDesign::Body","ISOOpticalThread_External"); b.Label="%s External ISO Optical v%s"%(desig,VERSION)
-    _meta(b,desig,d,p,tol,proc,pct,scale,"External / male")
-
-    core=b.newObject("PartDesign::AdditiveCylinder","ISO_ThreadCore"); core.Radius=root_r; core.Height=L+2*P+2*margin
-    core.Placement=App.Placement(App.Vector(0,0,start),App.Rotation()); doc.recompute(); _check(core,"External ISO core")
-    sk=b.newObject("Sketcher::SketchObject","ISO_ThreadProfile"); sk.AttachmentSupport=b.Origin.OriginFeatures[4]; sk.MapMode="FlatFace"
-    sk.addGeometry([Part.LineSegment(a,c),Part.LineSegment(c,q),Part.LineSegment(q,a)],False); doc.recompute()
-    h=b.newObject("PartDesign::AdditiveHelix","ISO_ThreadHelix"); h.Profile=sk; h.ReferenceAxis=(sk,["V_Axis"]); h.Mode=0
-    h.Pitch=P; h.Height=L+2*P; h.Turns=h.Height.Value/P; h.Angle=0; h.Growth=0; h.LeftHanded=not bool(right); h.Reversed=0
-    doc.recompute(); _check(h,"External ISO helix"); b.Tip=h
-    _trim_to_work_range(doc,b,major_r+max(0.1,0.2*P),L,"ISO_ZRangeTrim")
-
+def _external(doc,desig,d,p,length,tol,proc,pct,scale,right=True,create_chamfer=True,apply_chamfer=True,chamfer_pitch=1.0):
+    L=float(length)*scale;P=float(p);g=_sharp_profile_geometry(tol,P,scale)
+    major_r=g["e_major"];root_r=g["e_root"];flat=g["e_flat"]
+    if major_r<=root_r:raise ValueError("Invalid external sharp-V profile")
+    structural=max(0.02,0.03*P);core_r=root_r-structural
+    if core_r<=0:raise ValueError("External core radius is invalid")
+    # Hexagonal sweep profile: visible boundary is V-root -> flank -> flat crest -> flank -> V-root.
+    # The two short radial edges descend below the V to the structural core, so the core never forms the valley floor.
+    z=-P;halfP=0.5*P
+    pts=[App.Vector(core_r,z-halfP,0),App.Vector(root_r,z-halfP,0),App.Vector(major_r,z-flat/2.0,0),App.Vector(major_r,z+flat/2.0,0),App.Vector(root_r,z+halfP,0),App.Vector(core_r,z+halfP,0)]
+    margin=P+max(0.015,0.02*P);start=-P-margin
+    b=doc.addObject("PartDesign::Body","ISOOpticalThread_External");b.Label="%s External ISO Optical v%s"%(desig,VERSION);_meta(b,desig,d,p,tol,proc,pct,scale,"External / male")
+    _prop(b,"App::PropertyLength","ProfileCrestFlat","Profile experiment",flat);_prop(b,"App::PropertyLength","ProfileSharpVRootDiameter","Profile experiment",2.0*root_r);_prop(b,"App::PropertyLength","StructuralCoreDiameter","Profile experiment",2.0*core_r)
+    core=b.newObject("PartDesign::AdditiveCylinder","ISO_ThreadCore");core.Radius=core_r;core.Height=L+2*P+2*margin;core.Placement=App.Placement(App.Vector(0,0,start),App.Rotation());doc.recompute();_check(core,"External structural core")
+    sk=b.newObject("Sketcher::SketchObject","ISO_ThreadProfile");sk.AttachmentSupport=b.Origin.OriginFeatures[4];sk.MapMode="FlatFace";_closed_profile(sk,pts);doc.recompute()
+    h=b.newObject("PartDesign::AdditiveHelix","ISO_ThreadHelix");h.Profile=sk;h.ReferenceAxis=(sk,["V_Axis"]);h.Mode=0;h.Pitch=P;h.Height=L+2*P;h.Turns=h.Height.Value/P;h.Angle=0;h.Growth=0;h.LeftHanded=not bool(right);h.Reversed=0
+    doc.recompute();_check(h,"External ISO helix");b.Tip=h;_trim_to_work_range(doc,b,major_r+max(0.1,0.2*P),L,"ISO_ZRangeTrim")
     cutter_obj=None
     if create_chamfer:
-        H=max(0.001,float(chamfer_pitch)*P)
-        base=major_r-max(0.02,0.03*P)
-        reduced=max(0.05,base-H)
-        outer=major_r+max(0.10,0.20*P)
-        cutter=_annular_cutter([(reduced,0.0),(outer,0.0),(outer,H),(base,H)],"Male 45 degree lead-in")
-        cutter_obj=_make_chamfer_cutter(doc,"ISO_MaleChamferCutter","Male 45 degree lead-in cutter",cutter,not apply_chamfer)
+        H=max(0.001,float(chamfer_pitch)*P);base=major_r-max(0.02,0.03*P);reduced=max(0.05,base-H);outer=major_r+max(0.10,0.20*P)
+        cutter=_annular_cutter([(reduced,0.0),(outer,0.0),(outer,H),(base,H)],"Male 45 degree lead-in");cutter_obj=_make_chamfer_cutter(doc,"ISO_MaleChamferCutter","Male 45 degree lead-in cutter",cutter,not apply_chamfer)
         if apply_chamfer:_apply_separate_cut(doc,b,cutter_obj,"ISO_ThreadLeadIn","Male 45 degree lead-in")
-
-    try:core.ViewObject.Visibility=False; sk.ViewObject.Visibility=False
+    try:core.ViewObject.Visibility=False;sk.ViewObject.Visibility=False
     except Exception:pass
-    doc.recompute(); return b,cutter_obj
+    doc.recompute();return b,cutter_obj
 
-
-def create_internal_thread(standard="T2 / M42 x 0.75",length=8.0,wall_thickness=3.0,
-                           tolerance_pair="ISO 6H / 6g - Standard (close)",manufacturing_process="No process compensation",
-                           compensation_percent=None,custom_diameter=None,custom_pitch=None,
-                           custom_internal_pitch_target=None,custom_external_pitch_target=None,
-                           base_fit_name=None,right_hand=True,create_chamfer=True,apply_chamfer=True,
-                           chamfer_pitch=1.0,document=None):
-    doc=document or App.ActiveDocument or App.newDocument("ISOOpticalThreads")
-    desig,d,p,app,verified=_standard(standard,custom_diameter,custom_pitch)
-    tol=_tol(d,p,tolerance_pair,custom_internal_pitch_target,custom_external_pitch_target,base_fit_name)
-    proc,pct,scale=_process(manufacturing_process,compensation_percent)
+def create_internal_thread(standard="T2 / M42 x 0.75",length=8.0,wall_thickness=3.0,tolerance_pair="ISO 6H / 6g - Standard (close)",manufacturing_process="No process compensation",compensation_percent=None,custom_diameter=None,custom_pitch=None,custom_internal_pitch_target=None,custom_external_pitch_target=None,base_fit_name=None,right_hand=True,create_chamfer=True,apply_chamfer=True,chamfer_pitch=1.0,document=None):
+    doc=document or App.ActiveDocument or App.newDocument("ISOOpticalThreads");desig,d,p,app,verified=_standard(standard,custom_diameter,custom_pitch);tol=_tol(d,p,tolerance_pair,custom_internal_pitch_target,custom_external_pitch_target,base_fit_name);proc,pct,scale=_process(manufacturing_process,compensation_percent)
     return _internal(doc,desig,d,p,length,wall_thickness,tol,proc,pct,scale,right_hand,create_chamfer,apply_chamfer,chamfer_pitch)
 
-
-def create_external_thread(standard="T2 / M42 x 0.75",length=8.0,
-                           tolerance_pair="ISO 6H / 6g - Standard (close)",manufacturing_process="No process compensation",
-                           compensation_percent=None,custom_diameter=None,custom_pitch=None,
-                           custom_internal_pitch_target=None,custom_external_pitch_target=None,
-                           base_fit_name=None,right_hand=True,create_chamfer=True,apply_chamfer=True,
-                           chamfer_pitch=1.0,document=None):
-    doc=document or App.ActiveDocument or App.newDocument("ISOOpticalThreads")
-    desig,d,p,app,verified=_standard(standard,custom_diameter,custom_pitch)
-    tol=_tol(d,p,tolerance_pair,custom_internal_pitch_target,custom_external_pitch_target,base_fit_name)
-    proc,pct,scale=_process(manufacturing_process,compensation_percent)
+def create_external_thread(standard="T2 / M42 x 0.75",length=8.0,tolerance_pair="ISO 6H / 6g - Standard (close)",manufacturing_process="No process compensation",compensation_percent=None,custom_diameter=None,custom_pitch=None,custom_internal_pitch_target=None,custom_external_pitch_target=None,base_fit_name=None,right_hand=True,create_chamfer=True,apply_chamfer=True,chamfer_pitch=1.0,document=None):
+    doc=document or App.ActiveDocument or App.newDocument("ISOOpticalThreads");desig,d,p,app,verified=_standard(standard,custom_diameter,custom_pitch);tol=_tol(d,p,tolerance_pair,custom_internal_pitch_target,custom_external_pitch_target,base_fit_name);proc,pct,scale=_process(manufacturing_process,compensation_percent)
     return _external(doc,desig,d,p,length,tol,proc,pct,scale,right_hand,create_chamfer,apply_chamfer,chamfer_pitch)
 
-
 def create_matched_pair(**kw):
-    doc=kw.pop("document",None) or App.ActiveDocument or App.newDocument("ISOOpticalThreads")
-    i=create_internal_thread(document=doc,**kw); ekw=dict(kw); ekw.pop("wall_thickness",None)
-    e=create_external_thread(document=doc,**ekw); doc.recompute(); return i,e
-
+    doc=kw.pop("document",None) or App.ActiveDocument or App.newDocument("ISOOpticalThreads");i=create_internal_thread(document=doc,**kw);ekw=dict(kw);ekw.pop("wall_thickness",None);e=create_external_thread(document=doc,**ekw);doc.recompute();return i,e
 
 def _show_dialog():
     if Gui is None:return create_matched_pair()
     try:
-        from PySide import QtGui; Q=QtGui
+        from PySide import QtGui;Q=QtGui
     except Exception:
         from PySide2 import QtWidgets as Q
-
-    dlg=Q.QDialog(); dlg.setWindowTitle("ISO Optical Threads v%s"%VERSION); lay=Q.QFormLayout(dlg)
-    out=Q.QComboBox(); [out.addItem(x) for x in OUTPUT_MODES]; out.setCurrentText("Matched pair")
-    std=Q.QComboBox(); [std.addItem(x) for x in THREAD_STANDARDS]; std.setCurrentText("T2 / M42 x 0.75")
-    dia=Q.QDoubleSpinBox(); dia.setRange(1,500); dia.setDecimals(3); dia.setValue(42); dia.setSuffix(" mm")
-    pitch=Q.QDoubleSpinBox(); pitch.setRange(.1,10); pitch.setDecimals(3); pitch.setValue(.75); pitch.setSuffix(" mm")
-    length=Q.QDoubleSpinBox(); length.setRange(.75,200); length.setDecimals(3); length.setValue(8); length.setSuffix(" mm")
-    wall=Q.QDoubleSpinBox(); wall.setRange(.5,50); wall.setDecimals(3); wall.setValue(3); wall.setSuffix(" mm")
-    fit=Q.QComboBox(); [fit.addItem(x) for x in FIT_OPTIONS]; fit.addItem(CUSTOM_FIT); fit.setCurrentText("ISO 6H / 6g - Standard (close)")
-    proc=Q.QComboBox(); [proc.addItem(x) for x in PROCESS_PRESETS]; proc.setCurrentText("No process compensation")
-    comp=Q.QDoubleSpinBox(); comp.setRange(0,20); comp.setDecimals(3); comp.setSingleStep(.1); comp.setValue(0); comp.setSuffix(" %")
-    right=Q.QCheckBox(); right.setChecked(True)
-    make_ch=Q.QCheckBox(); make_ch.setChecked(True); apply_ch=Q.QCheckBox(); apply_ch.setChecked(True)
-    chlen=Q.QDoubleSpinBox(); chlen.setRange(.25,3); chlen.setDecimals(2); chlen.setSingleStep(.25); chlen.setValue(1.0); chlen.setSuffix(" x pitch (male & female)")
-
-    ip=Q.QDoubleSpinBox(); ip.setRange(0,500); ip.setDecimals(5); ip.setSuffix(" mm")
-    ep=Q.QDoubleSpinBox(); ep.setRange(0,500); ep.setDecimals(5); ep.setSuffix(" mm")
-    clear=Q.QLabel(""); imin=Q.QLabel(""); emaj=Q.QLabel(""); td2i=Q.QLabel(""); td2e=Q.QLabel(""); dev=Q.QLabel(""); source=Q.QLabel("")
+    dlg=Q.QDialog();dlg.setWindowTitle("ISO Optical Threads v%s"%VERSION);lay=Q.QFormLayout(dlg)
+    out=Q.QComboBox();[out.addItem(x) for x in OUTPUT_MODES];out.setCurrentText("Matched pair")
+    std=Q.QComboBox();[std.addItem(x) for x in THREAD_STANDARDS];std.setCurrentText("T2 / M42 x 0.75")
+    dia=Q.QDoubleSpinBox();dia.setRange(1,500);dia.setDecimals(3);dia.setValue(42);dia.setSuffix(" mm")
+    pitch=Q.QDoubleSpinBox();pitch.setRange(.1,10);pitch.setDecimals(3);pitch.setValue(.75);pitch.setSuffix(" mm")
+    length=Q.QDoubleSpinBox();length.setRange(.75,200);length.setDecimals(3);length.setValue(8);length.setSuffix(" mm")
+    wall=Q.QDoubleSpinBox();wall.setRange(.5,50);wall.setDecimals(3);wall.setValue(3);wall.setSuffix(" mm")
+    fit=Q.QComboBox();[fit.addItem(x) for x in FIT_OPTIONS];fit.addItem(CUSTOM_FIT);fit.setCurrentText("ISO 6H / 6g - Standard (close)")
+    proc=Q.QComboBox();[proc.addItem(x) for x in PROCESS_PRESETS];proc.setCurrentText("No process compensation")
+    comp=Q.QDoubleSpinBox();comp.setRange(0,20);comp.setDecimals(3);comp.setSingleStep(.1);comp.setValue(0);comp.setSuffix(" %")
+    right=Q.QCheckBox();right.setChecked(True);make_ch=Q.QCheckBox();make_ch.setChecked(True);apply_ch=Q.QCheckBox();apply_ch.setChecked(True)
+    chlen=Q.QDoubleSpinBox();chlen.setRange(.25,3);chlen.setDecimals(2);chlen.setSingleStep(.25);chlen.setValue(1.0);chlen.setSuffix(" x pitch (male & female)")
+    ip=Q.QDoubleSpinBox();ip.setRange(0,500);ip.setDecimals(5);ip.setSuffix(" mm");ep=Q.QDoubleSpinBox();ep.setRange(0,500);ep.setDecimals(5);ep.setSuffix(" mm")
+    clear=Q.QLabel("");imin=Q.QLabel("");emaj=Q.QLabel("");td2i=Q.QLabel("");td2e=Q.QLabel("");dev=Q.QLabel("");source=Q.QLabel("")
     try:source.setWordWrap(True)
     except Exception:pass
     state={"base_fit":"ISO 6H / 6g - Standard (close)","updating":False}
-
     def current_dp():
         st=str(std.currentText())
         if st=="Custom metric":return float(dia.value()),float(pitch.value())
-        row=THREAD_STANDARDS[st]; return float(row["diameter"]),float(row["pitch"])
-
-    def refresh_values(force_from_fit=False):
+        row=THREAD_STANDARDS[st];return float(row["diameter"]),float(row["pitch"])
+    def refresh_values(force=False):
         if state["updating"]:return
         state["updating"]=True
         try:
-            d,p=current_dp(); f=str(fit.currentText())
+            d,p=current_dp();f=str(fit.currentText())
             if f==CUSTOM_FIT:
-                base=state["base_fit"]; bt=_tol(d,p,base)
-                if force_from_fit:ip.setValue(bt["internal_pitch_target"]); ep.setValue(bt["external_pitch_target"])
-                t=_tol(d,p,CUSTOM_FIT,ip.value(),ep.value(),base); ip.setEnabled(True); ep.setEnabled(True)
+                base=state["base_fit"];bt=_tol(d,p,base)
+                if force:ip.setValue(bt["internal_pitch_target"]);ep.setValue(bt["external_pitch_target"])
+                t=_tol(d,p,CUSTOM_FIT,ip.value(),ep.value(),base);ip.setEnabled(True);ep.setEnabled(True)
             else:
-                state["base_fit"]=f; t=_tol(d,p,f); ip.setValue(t["internal_pitch_target"]); ep.setValue(t["external_pitch_target"])
-                ip.setEnabled(False); ep.setEnabled(False)
-            clear.setText("%.5f mm diametral"%(t["internal_pitch_target"]-t["external_pitch_target"]))
-            imin.setText("%.5f mm"%t["internal_minor_target"]); emaj.setText("%.5f mm"%t["external_major_target"])
-            td2i.setText("%.5f mm"%t.get("TD2",0.0)); td2e.setText("%.5f mm"%t.get("Td2",0.0))
-            dev.setText("%.5f mm"%t.get("es",0.0)); source.setText(t["source"])
+                state["base_fit"]=f;t=_tol(d,p,f);ip.setValue(t["internal_pitch_target"]);ep.setValue(t["external_pitch_target"]);ip.setEnabled(False);ep.setEnabled(False)
+            clear.setText("%.5f mm diametral"%(t["internal_pitch_target"]-t["external_pitch_target"]));imin.setText("%.5f mm"%t["internal_minor_target"]);emaj.setText("%.5f mm"%t["external_major_target"]);td2i.setText("%.5f mm"%t.get("TD2",0.0));td2e.setText("%.5f mm"%t.get("Td2",0.0));dev.setText("%.5f mm"%t.get("es",0.0));source.setText(t["source"])
         finally:state["updating"]=False
-
     def stdchg(n):
-        n=str(n); custom=n=="Custom metric"; dia.setEnabled(custom); pitch.setEnabled(custom)
-        if not custom:dia.setValue(THREAD_STANDARDS[n]["diameter"]); pitch.setValue(THREAD_STANDARDS[n]["pitch"])
+        n=str(n);custom=n=="Custom metric";dia.setEnabled(custom);pitch.setEnabled(custom)
+        if not custom:dia.setValue(THREAD_STANDARDS[n]["diameter"]);pitch.setValue(THREAD_STANDARDS[n]["pitch"])
         refresh_values(True)
     def fitchg(n):
         n=str(n)
         if n!=CUSTOM_FIT:state["base_fit"]=n
         refresh_values(True)
     def procchg(n):
-        n=str(n); custom=n=="Custom compensation"; comp.setEnabled(custom)
+        n=str(n);custom=n=="Custom compensation";comp.setEnabled(custom)
         if not custom:comp.setValue(float(PROCESS_PRESETS[n]))
     def chamferchg(*_):
-        enabled=make_ch.isChecked(); apply_ch.setEnabled(enabled); chlen.setEnabled(enabled)
+        enabled=make_ch.isChecked();apply_ch.setEnabled(enabled);chlen.setEnabled(enabled)
         if not enabled:apply_ch.setChecked(False)
-
-    std.currentTextChanged.connect(stdchg); fit.currentTextChanged.connect(fitchg); proc.currentTextChanged.connect(procchg)
-    make_ch.stateChanged.connect(chamferchg)
-    dia.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None)
-    pitch.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None)
-    ip.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None)
-    ep.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None)
-    stdchg(std.currentText()); procchg(proc.currentText()); chamferchg(); refresh_values(True)
-
-    for lab,w in [
-        ("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Length:",length),
-        ("Wall thickness (female):",wall),("ISO fit / practical sense:",fit),
-        ("Internal pitch target D2:",ip),("External pitch target d2:",ep),("Functional pitch clearance:",clear),
-        ("Derived internal minor D1:",imin),("Derived external major d:",emaj),
-        ("Internal pitch tolerance TD2:",td2i),("External pitch tolerance Td2:",td2e),
-        ("External fundamental deviation:",dev),("Tolerance calculation:",source),
-        ("Manufacturing process:",proc),("Process compensation:",comp),("Right hand:",right),
-        ("Create separate chamfer cutter:",make_ch),("Apply cutter automatically:",apply_ch),("Chamfer length:",chlen)
-    ]:lay.addRow(lab,w)
-
-    note=Q.QLabel("v0.3.1: finished male and female solids are clipped to Z=0..Length. Construction helix overrun stays internal. "
-                  "The chamfer length value applies to BOTH male and female; chamfer cutters remain separate objects.")
+    std.currentTextChanged.connect(stdchg);fit.currentTextChanged.connect(fitchg);proc.currentTextChanged.connect(procchg);make_ch.stateChanged.connect(chamferchg)
+    dia.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None);pitch.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None);ip.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None);ep.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None)
+    stdchg(std.currentText());procchg(proc.currentText());chamferchg();refresh_values(True)
+    for lab,w in [("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Length:",length),("Wall thickness (female):",wall),("ISO fit / practical sense:",fit),("Internal pitch target D2:",ip),("External pitch target d2:",ep),("Functional pitch clearance:",clear),("ISO internal minor target:",imin),("ISO external major target:",emaj),("Internal pitch tolerance TD2:",td2i),("External pitch tolerance Td2:",td2e),("External fundamental deviation:",dev),("Tolerance calculation:",source),("Manufacturing process:",proc),("Process compensation:",comp),("Right hand:",right),("Create separate chamfer cutter:",make_ch),("Apply cutter automatically:",apply_ch),("Chamfer length:",chlen)]:lay.addRow(lab,w)
+    note=Q.QLabel("v0.4.0 experiment: flanks stay 60 degrees and remain anchored to the selected ISO pitch targets. Crests are flat; roots continue to a sharp V. The male structural core is below the V and does not form the visible valley floor.")
     try:note.setWordWrap(True)
     except Exception:pass
-    lay.addRow(note)
-    btn=Q.QDialogButtonBox(Q.QDialogButtonBox.Ok|Q.QDialogButtonBox.Cancel); btn.accepted.connect(dlg.accept); btn.rejected.connect(dlg.reject); lay.addRow(btn)
+    lay.addRow(note);btn=Q.QDialogButtonBox(Q.QDialogButtonBox.Ok|Q.QDialogButtonBox.Cancel);btn.accepted.connect(dlg.accept);btn.rejected.connect(dlg.reject);lay.addRow(btn)
     if not (dlg.exec() if hasattr(dlg,"exec") else dlg.exec_()):return None
-
-    st=str(std.currentText()); om=str(out.currentText()); f=str(fit.currentText())
-    kw=dict(standard=st,length=length.value(),wall_thickness=wall.value(),tolerance_pair=f,
-            manufacturing_process=str(proc.currentText()),compensation_percent=comp.value(),
-            custom_diameter=dia.value() if st=="Custom metric" else None,
-            custom_pitch=pitch.value() if st=="Custom metric" else None,
-            custom_internal_pitch_target=ip.value() if f==CUSTOM_FIT else None,
-            custom_external_pitch_target=ep.value() if f==CUSTOM_FIT else None,
-            base_fit_name=state["base_fit"] if f==CUSTOM_FIT else None,
-            right_hand=right.isChecked(),create_chamfer=make_ch.isChecked(),
-            apply_chamfer=apply_ch.isChecked(),chamfer_pitch=chlen.value())
+    st=str(std.currentText());om=str(out.currentText());f=str(fit.currentText());kw=dict(standard=st,length=length.value(),wall_thickness=wall.value(),tolerance_pair=f,manufacturing_process=str(proc.currentText()),compensation_percent=comp.value(),custom_diameter=dia.value() if st=="Custom metric" else None,custom_pitch=pitch.value() if st=="Custom metric" else None,custom_internal_pitch_target=ip.value() if f==CUSTOM_FIT else None,custom_external_pitch_target=ep.value() if f==CUSTOM_FIT else None,base_fit_name=state["base_fit"] if f==CUSTOM_FIT else None,right_hand=right.isChecked(),create_chamfer=make_ch.isChecked(),apply_chamfer=apply_ch.isChecked(),chamfer_pitch=chlen.value())
     if om=="Internal / female":obj=create_internal_thread(**kw)
-    elif om=="External / male":kw.pop("wall_thickness",None); obj=create_external_thread(**kw)
+    elif om=="External / male":kw.pop("wall_thickness",None);obj=create_external_thread(**kw)
     else:obj=create_matched_pair(**kw)
-    if Gui:Gui.activeDocument().activeView().viewAxonometric(); Gui.activeDocument().activeView().fitAll()
+    if Gui:Gui.activeDocument().activeView().viewAxonometric();Gui.activeDocument().activeView().fitAll()
     return obj
-
 
 _show_dialog()
