@@ -1,21 +1,24 @@
 # -*- coding: utf-8 -*-
-"""ISO Optical Threads v0.5.0 for FreeCAD.
+"""ISO Optical Threads v0.5.1 for FreeCAD.
 
-v0.5.0
+v0.5.1
 ------
-* Keeps the deep 0.01 x pitch root land/valley geometry from v0.4.x.
-* Applies an FDM-oriented crest truncation equal to 2x the ISO-derived crest flat
-  on BOTH male and female profiles; roots/valleys are not made shallower.
-* Builds the threaded blank continuously from -2P to Length+2P, then trims the
-  finished part to exactly Z=0..Length. The thread therefore already exists before
-  both finished end faces instead of being born at either face.
-* Entry chamfer starts at Z=0 and is selectable as 1P or 2P in the dialog.
-* Default finished length is 10 mm.
-* The construction method is generic and applies to every listed/custom profile.
+* Keeps the working v0.5.0 continuous-thread construction, -2P/+2P overrun,
+  Z=0..Length end trimming, and selectable 1P/2P entry chamfer unchanged.
+* Uses a symmetric P/4 axial crest flat for BOTH male and female threads.
+* Keeps the deep 0.01 x pitch root land/valley geometry unchanged.
+* Adds a dedicated FDM fit based on the existing loosest 7H/6e option, then adds
+  0.2% of nominal diameter as extra total pitch-diameter clearance: female +0.1%
+  and male -0.1%. All existing ISO fit choices remain unchanged.
+* FDM PETG dimensional compensation is selectable. It defaults to 0.7% when the
+  PETG process is selected, but may be set to 0.0% when the slicer/material profile
+  already handles dimensional compensation.
+* Default finished length remains 10 mm and the construction remains generic for
+  every listed and custom thread profile.
 
-This is an optical/FDM CAD profile experiment. The extra crest truncation is an
-intentional print relief beyond the ISO-derived crest flat; tolerance calculations
-remain ISO-oriented and are not a substitute for ISO 1502 inspection.
+This is an optical/FDM CAD profile experiment. The P/4 crests and FDM clearance are
+intentional print-oriented profile choices; ISO-oriented tolerance calculations are
+retained for the ISO fit choices and are not a substitute for ISO 1502 inspection.
 """
 import math
 import FreeCAD as App
@@ -25,11 +28,15 @@ try:
 except Exception:
     Gui = None
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 TAN60 = math.sqrt(3.0)
 ROOT_FLAT_FACTOR = 0.01
-CREST_TRUNCATION_FACTOR = 2.0
+CREST_FLAT_FACTOR = 0.25
 THREAD_OVERRUN_PITCHES = 2.0
+FDM_TOTAL_DIAMETRAL_ALLOWANCE = 0.002
+FDM_HALF_DIAMETRAL_ALLOWANCE = 0.001
+FDM_FIT = "FDM / 7H-6e + 0.2% - Maximum print clearance"
+FDM_BASE_FIT = "ISO 7H / 6e - Maximum clearance"
 
 THREAD_STANDARDS = {
     "1.25in Filter / M28.5 x 0.6": dict(diameter=28.5, pitch=0.6, application="Astronomy 1.25-inch filter"),
@@ -49,10 +56,12 @@ FIT_OPTIONS = {
     "ISO 7H / 6f - Looser": dict(internal="7H", external="6f", label="Looser"),
     "ISO 6H / 6e - Very loose": dict(internal="6H", external="6e", label="Very loose"),
     "ISO 7H / 6e - Maximum clearance": dict(internal="7H", external="6e", label="Maximum clearance"),
+    FDM_FIT: dict(internal="7H", external="6e", label="FDM maximum print clearance"),
     "ISO basic profile - no tolerance offset": dict(internal="basic", external="basic", label="Basic profile"),
 }
 CUSTOM_FIT = "Custom from selected ISO fit"
-PROCESS_PRESETS = {"No process compensation":0.0, "FDM PETG":0.3, "Custom compensation":None}
+PROCESS_PRESETS = {"No process compensation":0.0, "FDM PETG":None, "Custom compensation":None}
+PROCESS_DEFAULTS = {"FDM PETG":0.7, "Custom compensation":0.0}
 OUTPUT_MODES = ("Internal / female", "External / male", "Matched pair")
 
 _G_ES_UM = {0.20:-17,0.25:-18,0.30:-18,0.35:-19,0.40:-19,0.45:-20,0.50:-20,0.60:-21,0.70:-22,0.75:-22,0.80:-24,1.00:-26,1.25:-28,1.50:-32,1.75:-34,2.00:-38,2.50:-42,3.00:-48,3.50:-53,4.00:-60,4.50:-63,5.00:-71,5.50:-75,6.00:-80,8.00:-100}
@@ -99,8 +108,25 @@ def _parse_class(cls):
 
 def _tol(d,p,fit_name,custom_internal_pitch=None,custom_external_pitch=None,base_fit_name=None):
     b=_basic(d,p)
+    if fit_name==FDM_FIT:
+        base=_tol(d,p,FDM_BASE_FIT)
+        shift=FDM_HALF_DIAMETRAL_ALLOWANCE*float(d)
+        ip=base["internal_pitch_target"]+shift
+        ep=base["external_pitch_target"]-shift
+        io=ip-b["D2"];eo=ep-b["d2"]
+        out=dict(base)
+        out.update(pair=FDM_FIT,practical_label="FDM maximum print clearance",
+                   internal_pitch_target=ip,external_pitch_target=ep,
+                   internal_pitch_offset=io,external_pitch_offset=eo,
+                   internal_minor_target=b["D1"]+io,internal_major_target=b["D"]+io,
+                   external_major_target=b["d"]+eo,external_root_target=b["d3"]+eo,
+                   functional_pitch_clearance=ip-ep,
+                   fdm_extra_diametral_clearance=FDM_TOTAL_DIAMETRAL_ALLOWANCE*float(d),
+                   source=base["source"]+"; plus FDM allowance +0.1% female / -0.1% male pitch diameter",
+                   base_fit_name=FDM_BASE_FIT)
+        return out
     if fit_name==CUSTOM_FIT:
-        if base_fit_name not in FIT_OPTIONS:base_fit_name="ISO 6H / 6g - Standard (close)"
+        if base_fit_name not in FIT_OPTIONS or base_fit_name==FDM_FIT:base_fit_name="ISO 6H / 6g - Standard (close)"
         base=_tol(d,p,base_fit_name)
         ip=base["internal_pitch_target"] if custom_internal_pitch is None else float(custom_internal_pitch)
         ep=base["external_pitch_target"] if custom_external_pitch is None else float(custom_external_pitch)
@@ -126,7 +152,11 @@ def _tol(d,p,fit_name,custom_internal_pitch=None,custom_external_pitch=None,base
 
 def _process(name,custom=None):
     if name not in PROCESS_PRESETS:name="No process compensation"
-    v=PROCESS_PRESETS[name];pct=float(custom if v is None and custom is not None else (0.0 if v is None else v))
+    preset=PROCESS_PRESETS[name]
+    if preset is None:
+        pct=float(PROCESS_DEFAULTS.get(name,0.0) if custom is None else custom)
+    else:
+        pct=float(preset)
     if pct<0.0 or pct>=100.0:raise ValueError("Process compensation must be >=0 and <100 percent")
     return name,pct,1.0/(1.0-pct/100.0)
 
@@ -147,7 +177,7 @@ def _prop(o,t,n,g,v):
     except Exception:pass
 
 def _meta(body,desig,d,p,tol,proc,pct,scale,kind):
-    vals=[("App::PropertyString","ThreadDesignation","ISO Thread",desig),("App::PropertyString","ThreadKind","ISO Thread",kind),("App::PropertyLength","NominalDiameter","ISO Thread",d),("App::PropertyLength","NominalPitch","ISO Thread",p),("App::PropertyString","TolerancePair","ISO Tolerance",tol["pair"]),("App::PropertyString","PracticalFitLabel","ISO Tolerance",tol.get("practical_label","")),("App::PropertyString","ToleranceSource","ISO Tolerance",tol["source"]),("App::PropertyLength","InternalPitchDiameterTarget","ISO Tolerance",tol["internal_pitch_target"]),("App::PropertyLength","ExternalPitchDiameterTarget","ISO Tolerance",tol["external_pitch_target"]),("App::PropertyLength","InternalMinorDiameterTarget","ISO Tolerance",tol["internal_minor_target"]),("App::PropertyLength","ExternalMajorDiameterTarget","ISO Tolerance",tol["external_major_target"]),("App::PropertyLength","FunctionalPitchClearance","ISO Tolerance",tol.get("functional_pitch_clearance",0.0)),("App::PropertyLength","InternalPitchDiameterTolerance","ISO Tolerance",tol.get("TD2",0.0)),("App::PropertyLength","ExternalPitchDiameterTolerance","ISO Tolerance",tol.get("Td2",0.0)),("App::PropertyLength","ExternalFundamentalDeviation","ISO Tolerance",tol.get("es",0.0)),("App::PropertyString","ManufacturingProcess","Process compensation",proc),("App::PropertyFloat","CompensationPercent","Process compensation",pct),("App::PropertyFloat","CompensationScale","Process compensation",scale)]
+    vals=[("App::PropertyString","ThreadDesignation","ISO Thread",desig),("App::PropertyString","ThreadKind","ISO Thread",kind),("App::PropertyLength","NominalDiameter","ISO Thread",d),("App::PropertyLength","NominalPitch","ISO Thread",p),("App::PropertyString","TolerancePair","ISO Tolerance",tol["pair"]),("App::PropertyString","PracticalFitLabel","ISO Tolerance",tol.get("practical_label","")),("App::PropertyString","ToleranceSource","ISO Tolerance",tol["source"]),("App::PropertyLength","InternalPitchDiameterTarget","ISO Tolerance",tol["internal_pitch_target"]),("App::PropertyLength","ExternalPitchDiameterTarget","ISO Tolerance",tol["external_pitch_target"]),("App::PropertyLength","InternalMinorDiameterTarget","ISO Tolerance",tol["internal_minor_target"]),("App::PropertyLength","ExternalMajorDiameterTarget","ISO Tolerance",tol["external_major_target"]),("App::PropertyLength","FunctionalPitchClearance","ISO Tolerance",tol.get("functional_pitch_clearance",0.0)),("App::PropertyLength","FDMExtraDiametralClearance","ISO Tolerance",tol.get("fdm_extra_diametral_clearance",0.0)),("App::PropertyLength","InternalPitchDiameterTolerance","ISO Tolerance",tol.get("TD2",0.0)),("App::PropertyLength","ExternalPitchDiameterTolerance","ISO Tolerance",tol.get("Td2",0.0)),("App::PropertyLength","ExternalFundamentalDeviation","ISO Tolerance",tol.get("es",0.0)),("App::PropertyString","ManufacturingProcess","Process compensation",proc),("App::PropertyFloat","CompensationPercent","Process compensation",pct),("App::PropertyFloat","CompensationScale","Process compensation",scale)]
     for args in vals:_prop(body,*args)
 
 def _check(obj,label):
@@ -157,7 +187,7 @@ def _check_shape(shape,label):
 def _closed_profile(sk,pts):sk.addGeometry([Part.LineSegment(pts[i],pts[(i+1)%len(pts)]) for i in range(len(pts))],False)
 
 def _profile_geometry(tol,p,scale):
-    """2x ISO-derived crest truncation, while preserving the v0.4 root radius."""
+    """Symmetric P/4 crests while preserving the deep v0.5.0 root geometry."""
     P=float(p);rf=max(1e-5,ROOT_FLAT_FACTOR*P)
     e_pitch=0.5*tol["external_pitch_target"]*scale;e_iso_major=0.5*tol["external_major_target"]*scale
     i_pitch=0.5*tol["internal_pitch_target"]*scale;i_iso_minor=0.5*tol["internal_minor_target"]*scale
@@ -165,12 +195,11 @@ def _profile_geometry(tol,p,scale):
     i_iso_flat=P/2.0-2.0*(i_pitch-i_iso_minor)/TAN60
     tiny=max(1e-5,1e-4*P)
     e_iso_flat=max(tiny,min(0.49*P,e_iso_flat));i_iso_flat=max(tiny,min(0.49*P,i_iso_flat))
-    e_flat=min(0.90*P,CREST_TRUNCATION_FACTOR*e_iso_flat)
-    i_flat=min(0.90*P,CREST_TRUNCATION_FACTOR*i_iso_flat)
+    e_flat=CREST_FLAT_FACTOR*P;i_flat=CREST_FLAT_FACTOR*P
     radial_to_root=TAN60*(P/4.0-rf/2.0)
     e_root=e_pitch-radial_to_root;i_root=i_pitch+radial_to_root
     e_run=0.5*((P-rf)-e_flat);i_run=0.5*((P-rf)-i_flat)
-    if e_run<=0 or i_run<=0:raise ValueError("Crest truncation leaves no 60-degree flank")
+    if e_run<=0 or i_run<=0:raise ValueError("P/4 crest leaves no 60-degree flank")
     e_crest=e_root+TAN60*e_run
     i_crest=i_root-TAN60*i_run
     return dict(e_pitch=e_pitch,e_iso_major=e_iso_major,e_crest=e_crest,e_root=e_root,e_flat=e_flat,e_iso_flat=e_iso_flat,
@@ -228,7 +257,7 @@ def _internal(doc,desig,d,p,length,wall,tol,proc,pct,scale,right=True,create_cha
     outer_r=max(root_r+0.25,0.5*float(d)*scale+W)
     raw0,raw1,overrun=_raw_range(L,P);raw_len=raw1-raw0
     b=doc.addObject("PartDesign::Body","ISOOpticalThread_Internal");b.Label="%s Internal ISO Optical v%s"%(desig,VERSION);_meta(b,desig,d,p,tol,proc,pct,scale,"Internal / female")
-    _prop(b,"App::PropertyLength","ProfileCrestFlat","FDM profile",flat);_prop(b,"App::PropertyLength","ISOReferenceCrestFlat","FDM profile",g["i_iso_flat"]);_prop(b,"App::PropertyFloat","CrestTruncationFactor","FDM profile",CREST_TRUNCATION_FACTOR);_prop(b,"App::PropertyLength","ActualCrestDiameter","FDM profile",2.0*crest_r);_prop(b,"App::PropertyLength","ProfileRootFlat","FDM profile",rf);_prop(b,"App::PropertyLength","ProfileRootDiameter","FDM profile",2.0*root_r);_prop(b,"App::PropertyLength","RawThreadOverrunEachEnd","FDM profile",overrun)
+    _prop(b,"App::PropertyLength","ProfileCrestFlat","FDM profile",flat);_prop(b,"App::PropertyLength","ISOReferenceCrestFlat","FDM profile",g["i_iso_flat"]);_prop(b,"App::PropertyLength","ActualCrestDiameter","FDM profile",2.0*crest_r);_prop(b,"App::PropertyLength","ProfileRootFlat","FDM profile",rf);_prop(b,"App::PropertyLength","ProfileRootDiameter","FDM profile",2.0*root_r);_prop(b,"App::PropertyLength","RawThreadOverrunEachEnd","FDM profile",overrun)
     outer=b.newObject("PartDesign::AdditiveCylinder","SleeveOuter");outer.Radius=outer_r;outer.Height=raw_len;outer.Angle=360;outer.Placement=App.Placement(App.Vector(0,0,raw0),App.Rotation());doc.recompute()
     bore=b.newObject("PartDesign::SubtractiveCylinder","FDM_Crest_Bore");bore.Radius=crest_r;bore.Height=raw_len;bore.Placement=App.Placement(App.Vector(0,0,raw0),App.Rotation());doc.recompute();_check(bore,"Internal bore")
     z=raw0+0.5*P;groove_half=0.5*(P-flat)
@@ -255,7 +284,7 @@ def _external(doc,desig,d,p,length,tol,proc,pct,scale,right=True,create_chamfer=
     raw0,raw1,overrun=_raw_range(L,P);raw_len=raw1-raw0;z=raw0+0.5*P;core_r=root_r
     pts=[App.Vector(root_r,z-(P-rf)/2.0,0),App.Vector(major_r,z-flat/2.0,0),App.Vector(major_r,z+flat/2.0,0),App.Vector(root_r,z+(P-rf)/2.0,0)]
     b=doc.addObject("PartDesign::Body","ISOOpticalThread_External");b.Label="%s External ISO Optical v%s"%(desig,VERSION);_meta(b,desig,d,p,tol,proc,pct,scale,"External / male")
-    _prop(b,"App::PropertyLength","ProfileCrestFlat","FDM profile",flat);_prop(b,"App::PropertyLength","ISOReferenceCrestFlat","FDM profile",g["e_iso_flat"]);_prop(b,"App::PropertyFloat","CrestTruncationFactor","FDM profile",CREST_TRUNCATION_FACTOR);_prop(b,"App::PropertyLength","ActualCrestDiameter","FDM profile",2.0*major_r);_prop(b,"App::PropertyLength","ProfileRootFlat","FDM profile",rf);_prop(b,"App::PropertyLength","ProfileRootDiameter","FDM profile",2.0*root_r);_prop(b,"App::PropertyLength","StructuralCoreDiameter","FDM profile",2.0*core_r);_prop(b,"App::PropertyLength","RawThreadOverrunEachEnd","FDM profile",overrun)
+    _prop(b,"App::PropertyLength","ProfileCrestFlat","FDM profile",flat);_prop(b,"App::PropertyLength","ISOReferenceCrestFlat","FDM profile",g["e_iso_flat"]);_prop(b,"App::PropertyLength","ActualCrestDiameter","FDM profile",2.0*major_r);_prop(b,"App::PropertyLength","ProfileRootFlat","FDM profile",rf);_prop(b,"App::PropertyLength","ProfileRootDiameter","FDM profile",2.0*root_r);_prop(b,"App::PropertyLength","StructuralCoreDiameter","FDM profile",2.0*core_r);_prop(b,"App::PropertyLength","RawThreadOverrunEachEnd","FDM profile",overrun)
     core=b.newObject("PartDesign::AdditiveCylinder","ISO_ThreadCore");core.Radius=core_r;core.Height=raw_len;core.Placement=App.Placement(App.Vector(0,0,raw0),App.Rotation());doc.recompute();_check(core,"External structural core")
     sk=b.newObject("Sketcher::SketchObject","ISO_ThreadProfile");sk.AttachmentSupport=b.Origin.OriginFeatures[4];sk.MapMode="FlatFace";_closed_profile(sk,pts);doc.recompute()
     hh=max(1e-6,raw_len-P);h=b.newObject("PartDesign::AdditiveHelix","ISO_ThreadHelix");h.Profile=sk;h.ReferenceAxis=(sk,["V_Axis"]);h.Mode=0;h.Pitch=P;h.Height=hh;h.Turns=h.Height.Value/P;h.Angle=0;h.Growth=0;h.LeftHanded=not bool(right);h.Reversed=0
@@ -295,14 +324,14 @@ def _show_dialog():
     wall=Q.QDoubleSpinBox();wall.setRange(.5,50);wall.setDecimals(3);wall.setValue(3);wall.setSuffix(" mm")
     fit=Q.QComboBox();[fit.addItem(x) for x in FIT_OPTIONS];fit.addItem(CUSTOM_FIT);fit.setCurrentText("ISO 6H / 6g - Standard (close)")
     proc=Q.QComboBox();[proc.addItem(x) for x in PROCESS_PRESETS];proc.setCurrentText("No process compensation")
-    comp=Q.QDoubleSpinBox();comp.setRange(0,20);comp.setDecimals(3);comp.setSingleStep(.1);comp.setValue(0);comp.setSuffix(" %")
+    comp=Q.QDoubleSpinBox();comp.setRange(0,3);comp.setDecimals(3);comp.setSingleStep(.1);comp.setValue(0);comp.setSuffix(" %")
     right=Q.QCheckBox();right.setChecked(True);make_ch=Q.QCheckBox();make_ch.setChecked(True);apply_ch=Q.QCheckBox();apply_ch.setChecked(True)
     chlen=Q.QComboBox();chlen.addItem("1 x pitch",1.0);chlen.addItem("2 x pitch",2.0);chlen.setCurrentIndex(0)
     ip=Q.QDoubleSpinBox();ip.setRange(0,500);ip.setDecimals(5);ip.setSuffix(" mm");ep=Q.QDoubleSpinBox();ep.setRange(0,500);ep.setDecimals(5);ep.setSuffix(" mm")
-    clear=Q.QLabel("");imin=Q.QLabel("");emaj=Q.QLabel("");td2i=Q.QLabel("");td2e=Q.QLabel("");dev=Q.QLabel("");source=Q.QLabel("")
+    clear=Q.QLabel("");fdmextra=Q.QLabel("");imin=Q.QLabel("");emaj=Q.QLabel("");td2i=Q.QLabel("");td2e=Q.QLabel("");dev=Q.QLabel("");source=Q.QLabel("")
     try:source.setWordWrap(True)
     except Exception:pass
-    state={"base_fit":"ISO 6H / 6g - Standard (close)","updating":False}
+    state={"base_fit":"ISO 6H / 6g - Standard (close)","updating":False,"process_values":{"FDM PETG":0.7,"Custom compensation":0.0}}
     def current_dp():
         st=str(std.currentText())
         if st=="Custom metric":return float(dia.value()),float(pitch.value())
@@ -317,8 +346,9 @@ def _show_dialog():
                 if force:ip.setValue(bt["internal_pitch_target"]);ep.setValue(bt["external_pitch_target"])
                 t=_tol(d,p,CUSTOM_FIT,ip.value(),ep.value(),base);ip.setEnabled(True);ep.setEnabled(True)
             else:
-                state["base_fit"]=f;t=_tol(d,p,f);ip.setValue(t["internal_pitch_target"]);ep.setValue(t["external_pitch_target"]);ip.setEnabled(False);ep.setEnabled(False)
-            clear.setText("%.5f mm diametral"%(t["internal_pitch_target"]-t["external_pitch_target"]));imin.setText("%.5f mm ISO target"%t["internal_minor_target"]);emaj.setText("%.5f mm ISO target"%t["external_major_target"]);td2i.setText("%.5f mm"%t.get("TD2",0.0));td2e.setText("%.5f mm"%t.get("Td2",0.0));dev.setText("%.5f mm"%t.get("es",0.0));source.setText(t["source"])
+                if f!=FDM_FIT:state["base_fit"]=f
+                t=_tol(d,p,f);ip.setValue(t["internal_pitch_target"]);ep.setValue(t["external_pitch_target"]);ip.setEnabled(False);ep.setEnabled(False)
+            clear.setText("%.5f mm diametral"%(t["internal_pitch_target"]-t["external_pitch_target"]));fdmextra.setText("%.5f mm"%t.get("fdm_extra_diametral_clearance",0.0));imin.setText("%.5f mm target"%t["internal_minor_target"]);emaj.setText("%.5f mm target"%t["external_major_target"]);td2i.setText("%.5f mm"%t.get("TD2",0.0));td2e.setText("%.5f mm"%t.get("Td2",0.0));dev.setText("%.5f mm"%t.get("es",0.0));source.setText(t["source"])
         finally:state["updating"]=False
     def stdchg(n):
         n=str(n);custom=n=="Custom metric";dia.setEnabled(custom);pitch.setEnabled(custom)
@@ -326,19 +356,23 @@ def _show_dialog():
         refresh_values(True)
     def fitchg(n):
         n=str(n)
-        if n!=CUSTOM_FIT:state["base_fit"]=n
+        if n not in (CUSTOM_FIT,FDM_FIT):state["base_fit"]=n
         refresh_values(True)
+    def compchg(v):
+        n=str(proc.currentText())
+        if n in state["process_values"]:state["process_values"][n]=float(v)
     def procchg(n):
-        n=str(n);custom=n=="Custom compensation";comp.setEnabled(custom)
-        if not custom:comp.setValue(float(PROCESS_PRESETS[n]))
+        n=str(n);adjustable=PROCESS_PRESETS.get(n) is None;comp.setEnabled(adjustable)
+        if adjustable:comp.setValue(float(state["process_values"].get(n,PROCESS_DEFAULTS.get(n,0.0))))
+        else:comp.setValue(float(PROCESS_PRESETS[n]))
     def chamferchg(*_):
         enabled=make_ch.isChecked();apply_ch.setEnabled(enabled);chlen.setEnabled(enabled)
         if not enabled:apply_ch.setChecked(False)
-    std.currentTextChanged.connect(stdchg);fit.currentTextChanged.connect(fitchg);proc.currentTextChanged.connect(procchg);make_ch.stateChanged.connect(chamferchg)
+    std.currentTextChanged.connect(stdchg);fit.currentTextChanged.connect(fitchg);proc.currentTextChanged.connect(procchg);comp.valueChanged.connect(compchg);make_ch.stateChanged.connect(chamferchg)
     dia.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None);pitch.valueChanged.connect(lambda *_:refresh_values(True) if str(std.currentText())=="Custom metric" else None);ip.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None);ep.valueChanged.connect(lambda *_:refresh_values(False) if str(fit.currentText())==CUSTOM_FIT else None)
     stdchg(std.currentText());procchg(proc.currentText());chamferchg();refresh_values(True)
-    for lab,w in [("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Finished length H:",length),("Wall thickness (female):",wall),("ISO fit / practical sense:",fit),("Internal pitch target D2:",ip),("External pitch target d2:",ep),("Functional pitch clearance:",clear),("ISO internal minor target:",imin),("ISO external major target:",emaj),("Internal pitch tolerance TD2:",td2i),("External pitch tolerance Td2:",td2e),("External fundamental deviation:",dev),("Tolerance calculation:",source),("Manufacturing process:",proc),("Process compensation:",comp),("Right hand:",right),("Create separate chamfer cutter:",make_ch),("Apply cutter automatically:",apply_ch),("Entry chamfer length:",chlen)]:lay.addRow(lab,w)
-    note=Q.QLabel("v0.5.0: thread is generated continuously from -2P to H+2P, entry chamfer begins at Z=0, and the finished body is trimmed to exactly Z=0..H. Crests use 2x the ISO-derived flat as intentional FDM relief; the deep root/valley is unchanged.")
+    for lab,w in [("Output:",out),("Thread standard:",std),("Diameter:",dia),("Pitch:",pitch),("Finished length H:",length),("Wall thickness (female):",wall),("ISO/FDM fit:",fit),("Internal pitch target D2:",ip),("External pitch target d2:",ep),("Functional pitch clearance:",clear),("Extra FDM diametral allowance:",fdmextra),("Internal minor target:",imin),("External major target:",emaj),("Internal pitch tolerance TD2:",td2i),("External pitch tolerance Td2:",td2e),("External fundamental deviation:",dev),("Tolerance calculation:",source),("Manufacturing process:",proc),("Shrinkage / dimensional compensation:",comp),("Right hand:",right),("Create separate chamfer cutter:",make_ch),("Apply cutter automatically:",apply_ch),("Entry chamfer length:",chlen)]:lay.addRow(lab,w)
+    note=Q.QLabel("v0.5.1: male and female crests are P/4; deep valleys are unchanged. The FDM fit is the existing 7H/6e maximum-clearance fit plus 0.2% nominal-diameter pitch clearance split equally between female and male. PETG compensation is selectable and may be 0% if the slicer already compensates dimensions. Continuous -2P..H+2P construction, end trimming and 1P/2P chamfer remain unchanged.")
     try:note.setWordWrap(True)
     except Exception:pass
     lay.addRow(note);btn=Q.QDialogButtonBox(Q.QDialogButtonBox.Ok|Q.QDialogButtonBox.Cancel);btn.accepted.connect(dlg.accept);btn.rejected.connect(dlg.reject);lay.addRow(btn)
